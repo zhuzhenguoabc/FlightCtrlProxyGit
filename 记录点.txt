@@ -1,0 +1,24 @@
+1: 将标准输出存储到文件里方便查看LOG。可以使用tail - f xxx_log_file动态查看
+
+	//按时间顺序，限制LOG数量, tail -n +5 保留最后5个文件
+	//xargs -r 当xargs的输入为空的时候则停止xargs，不用再去执行了，确保不会因为没有文件而继续执行后的rm误操作
+	system("find /home/linaro/ -type f -name 'log_snav*'|xargs -r ls -lt|tail -n +5|awk '{print $9}'| xargs rm -rf");
+
+	//Linux的获取当前时间，tm_year+1900, tm_mon+1
+	time_t now;
+	struct tm *curTime;
+	now = time(NULL);
+	curTime = localtime(&now);
+
+	char log_filename[256];
+	sprintf(log_filename,"/home/linaro/log_snav_%04d-%02d-%02d-%02d-%02d-%02d",
+							curTime->tm_year+1900,curTime->tm_mon+1,curTime->tm_mday,
+							curTime->tm_hour,curTime->tm_min,curTime->tm_sec);
+							
+	freopen(log_filename, "a", stdout);
+	setbuf(stdout, NULL);		//needn't cache and fflush, output immediately
+	freopen(log_filename, "a", stderr);
+	setbuf(stderr, NULL);		//needn't cache and fflush, output immediately
+
+  fclose(stdout);
+	fclose(stderr);
