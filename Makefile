@@ -32,8 +32,7 @@ LIBS	+=	$(LIB_DIR)/libcamera.so.0 \
 					$(LIB_DIR)/libglib-2.0.so.0 \
 										
 
-TARGET = flightctrl_proxy uf1_calibration_test uf1_waypoint_fly_test
-#TARGET = flightctrl_proxy
+TARGET = flightctrl_proxy uf1_calibration_test
 
 all: $(TARGET)
 

@@ -73,9 +73,8 @@ using namespace std;
 #define SNAV_CMD_BODY_FOLLOW  					"1101"
 
 #define SNAV_CMD_OPTIC_FLOW_CALIB  				"1201"
-#define SNAV_CMD_START_PLAN_TEST_START  		"1202"
-#define SNAV_CMD_START_PLAN_TEST_END 			"1203"
-#define SNAV_CMD_START_EMERG_STOP  				"1204"
+#define SNAV_CMD_FLY_TEST  						"1202"
+#define SNAV_CMD_ROTATION_TEST					"1203"
 
 #define SNAV_CMD_RETURN_OPTIC_FLOW_CALIB		"2201"
 
@@ -144,7 +143,6 @@ using namespace std;
 #define SDCARD_DIR								"/media/sdcard"
 
 //#define LOW_BATTERY_LANDING
-#define GPS_MAG_SWITCH
 //#define HEIGHT_LIMIT
 #define SPEED_LIMIT_FLAG
 #define CIRCLE_HEIGHT_LIMIT_FLAG
@@ -867,6 +865,12 @@ int main(int argc, char* argv[])
 	float distance_to_home = 0;
 	float vel_target = 0.75;	 //m/sec
 
+	// Fly test mission
+	bool fly_test_mission = false;
+	int  fly_test_count = 0;
+	bool rotation_test_mission = false;
+	int  rotation_test_count = 0;
+
 	// Circle mission
 	int circle_cam_point_direct = 1;	// point to inside by default 1(inside) -1(outside)
 	bool circle_mission = false;
@@ -966,8 +970,6 @@ int main(int argc, char* argv[])
 	// Add end
 
 	// For revise height with barometer and sonar
-	int gps_mag_flag = 1;
-
 	int use_revise_height = 1;
 
 	int revise_rule = 1;
@@ -1180,6 +1182,7 @@ int main(int argc, char* argv[])
 		pthread_attr_destroy(&thread_attr);
 	}
 
+
 	SnavCachedData* snav_data = NULL;
 	if (sn_get_flight_data_ptr(sizeof(SnavCachedData), &snav_data) != 0)
 	{
@@ -1203,7 +1206,6 @@ int main(int argc, char* argv[])
 	// 300MS avoid of udp missing data
 	setsockopt(server_udp_sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout_udp, sizeof(struct timeval));
 	setsockopt(server_udp_sockfd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout_udp, sizeof(struct timeval));
-
 
 	// The Udp Circle
 	while (true)
@@ -1388,35 +1390,13 @@ int main(int argc, char* argv[])
 			// revise the z position end
 			// Add end
 
-			float x_vel, y_vel;
-#ifdef	GPS_MAG_SWITCH
-			/*if (gps_enabled && (gps_status == SN_DATA_VALID) && (gps_mag_flag == 1))*/
-			if (gps_enabled && (gps_status == SN_DATA_VALID))
-			{
-				x_vel = (float)snav_data->gps_pos_vel.velocity_estimated[0];
-				y_vel = (float)snav_data->gps_pos_vel.velocity_estimated[1];
-			}
-			else
-#endif
-			{
-				x_vel = (float)snav_data->optic_flow_pos_vel.velocity_estimated[0];
-				y_vel = (float)snav_data->optic_flow_pos_vel.velocity_estimated[1];
-			}
-
 			// Get the current estimated position and yaw
 			float x_est, y_est, z_est, yaw_est;
 			float x_est_gps, y_est_gps, z_est_gps, yaw_est_gps;
 			float x_des_gps, y_des_gps, z_des_gps, yaw_des_gps;
-#ifdef	GPS_MAG_SWITCH
-			/*if (gps_enabled && (gps_status == SN_DATA_VALID) && (gps_mag_flag == 1))*/
+
 			if (gps_enabled)
 			{
-				/*
-				x_est_gps = (float)snav_data->high_level_control_data.position_estimated[0];
-				y_est_gps = (float)snav_data->high_level_control_data.position_estimated[1];
-				z_est_gps = (float)snav_data->high_level_control_data.position_estimated[2];
-				yaw_est_gps = (float)snav_data->high_level_control_data.yaw_estimated;
-				*/
 				x_est_gps = (float)snav_data->gps_pos_vel.position_estimated[0];
 				y_est_gps = (float)snav_data->gps_pos_vel.position_estimated[1];
 				z_est_gps = (float)snav_data->gps_pos_vel.position_estimated[2];
@@ -1428,7 +1408,6 @@ int main(int argc, char* argv[])
 				yaw_des_gps = (float)snav_data->gps_pos_vel.yaw_desired;
 			}
 			else
-#endif
 			{
 				x_est_gps = 0;
 				y_est_gps = 0;
@@ -1637,25 +1616,20 @@ int main(int argc, char* argv[])
 				strcat(drone_state_error, ":4");
 			}
 
-#ifdef	GPS_MAG_SWITCH
-			if (gps_mag_flag == 1)
+			if (gps_enabled)
 			{
-				/*
-				if ((mag_status != SN_DATA_VALID) && (mag_status != SN_DATA_WARNING))
+				if (mag_status != SN_DATA_VALID)
 				{
 					drone_state = DroneState::MAG_ERROR;
 					strcat(drone_state_error, ":5");
 				}
-				*/
 
-				//if ((gps_status != SN_DATA_VALID) && (gps_status != SN_DATA_NOT_INITIALIZED) && (gps_status != SN_DATA_NO_LOCK))
 				if (gps_status != SN_DATA_VALID)
 				{
 					drone_state = DroneState::GPS_ERROR;
 					strcat(drone_state_error, ":6");
 				}
 			}
-#endif
 
 			if (sonar_status != SN_DATA_VALID)
 			{
@@ -1798,6 +1772,9 @@ int main(int argc, char* argv[])
 						// Reset the state when get udp control
 						current_position =0;
 
+						fly_test_mission = false;
+						rotation_test_mission = false;
+
 						circle_mission = false;
 						calcCirclePoint = false;
 
@@ -1885,7 +1862,7 @@ int main(int argc, char* argv[])
 									}
 									else
 									{
-										if (circle_mission || return_mission)
+										if (circle_mission || return_mission || fly_test_mission || rotation_test_mission)
 										{
 											cmd0 = cmd0*speed_coefficient;
 											cmd1 = cmd1*speed_coefficient;
@@ -2136,14 +2113,6 @@ int main(int argc, char* argv[])
 								length=sendto(server_udp_sockfd,result_to_client,strlen(result_to_client),0,(struct sockaddr *)&remote_addr,sizeof(struct sockaddr));
 							}
 #endif
-							/*
-							if ((x_vel > fMaxVel) || y_vel > fMaxVel)
-							{
-								sn_apply_cmd_mapping(curSendMode, RC_OPT_LINEAR_MAPPING,
-										cmd0, cmd1, cmd2, cmd3,
-										&cmd0, &cmd1, &cmd2, &cmd3);
-							}
-							*/
 
 							// Send the commands to Snapdragon Navigator with default RC options
 			        		sn_send_rc_command(type, RC_OPT_DEFAULT_RC, cmd0, cmd1, cmd2, cmd3);
@@ -2221,7 +2190,6 @@ int main(int argc, char* argv[])
 					}
 					else
 					{
-#ifdef GPS_MAG_SWITCH
 						if (gps_enabled && (gps_status == SN_DATA_VALID) && (take_off_with_gps_valid))
 						{
 							sprintf(xyz_info, "xyz_info:%f:%f:%f", (x_est_gps - x_est_gps_startup),
@@ -2229,7 +2197,6 @@ int main(int argc, char* argv[])
 																   (z_est_gps - z_est_gps_startup));
 						}
 						else
-#endif
 						{
 							sprintf(xyz_info, "xyz_info:%f:%f:%f", (x_est-x_est_startup),
 																   (y_est-y_est_startup),
@@ -2643,11 +2610,6 @@ int main(int argc, char* argv[])
 					use_revise_height = atoi(udp_msg_array[1].c_str());
 					DEBUG("udp receive  use_revise_height=%d\n",use_revise_height);
 				}
-				else if ((udp_msg_array.size() >= 2) && (udp_msg_array[0].compare("gps_mag_flag") == 0))
-				{
-					gps_mag_flag = atoi(udp_msg_array[1].c_str());
-					DEBUG("udp receive  gps_mag_flag=%d\n",gps_mag_flag);
-				}
 				else if ((udp_msg_array.size() >= 2) && (udp_msg_array[0].compare("revise_rule") == 0))
 				{
 					revise_rule = atoi(udp_msg_array[1].c_str());
@@ -2791,29 +2753,6 @@ int main(int argc, char* argv[])
 					}
 				}
 			}
-
-			/*
-			if ((udp_msg_array.size() >= 1)
-				&& (udp_msg_array[0].compare(SNAV_CMD_START_PLAN_TEST_START) == 0)
-				&& (props_state == SN_PROPS_STATE_NOT_SPINNING))
-			{
-				system("uf1_waypoint_fly_test -d");
-			}
-
-			if ((udp_msg_array.size() >= 1)
-				&& (udp_msg_array[0].compare(SNAV_CMD_START_PLAN_TEST_END) == 0)
-				&& (props_state == SN_PROPS_STATE_NOT_SPINNING))
-			{
-
-			}
-
-			if ((udp_msg_array.size() >= 1)
-				&& (udp_msg_array[0].compare(SNAV_CMD_START_EMERG_STOP) == 0)
-				&& (props_state == SN_PROPS_STATE_NOT_SPINNING))
-			{
-				system("stop snav");
-			}
-			*/
 
 			// Update
 			if ((udp_msg_array.size() >= 1)
@@ -3248,7 +3187,6 @@ int main(int argc, char* argv[])
 					z_est_startup = z_est;
 					yaw_est_startup = yaw_est;
 
-#ifdef GPS_MAG_SWITCH
 					if (gps_enabled && (gps_status == SN_DATA_VALID))
 					{
 						x_est_gps_startup = x_est_gps;
@@ -3269,7 +3207,7 @@ int main(int argc, char* argv[])
 											, (struct sockaddr *)&remote_addr, sizeof(struct sockaddr));
 						DEBUG("udp sendto SNAV_TASK_SHOW_GPS_ERROR result_to_client=%s, length=%d\n", result_to_client, length);
 					}
-#endif
+
 					sn_spin_props();
 				}
 				else if (props_state == SN_PROPS_STATE_SPINNING)
@@ -3326,11 +3264,11 @@ int main(int argc, char* argv[])
 					}
 					else
 					{
-						if (z_des - z_est_startup >= fTakeOffHeight)
+						if (/*z_des - z_est_startup*/revise_height >= fTakeOffHeight)
 						{
 							state = MissionState::LOITER;
 						}
-						else if(z_des - z_est_startup > 0.5f*fTakeOffHeight)
+						else if(/*z_des - z_est_startup*/revise_height > 0.5f*fTakeOffHeight)
 						{
 							z_vel_des = kTakeoffSpeed*0.3f;
 						}
@@ -3348,7 +3286,10 @@ int main(int argc, char* argv[])
 					//reset all the mission
 					current_position =0;
 
-					circle_mission=false;
+					fly_test_mission = false;
+					rotation_test_mission = false;
+
+					circle_mission = false;
 					calcCirclePoint = false;
 
 					panorama_mission = false;
@@ -3424,6 +3365,9 @@ int main(int argc, char* argv[])
 					// reset all the mission
 					current_position = 0;
 
+					fly_test_mission = false;
+					rotation_test_mission = false;
+
 					circle_mission = false;
 					calcCirclePoint = false;
 
@@ -3482,6 +3426,8 @@ int main(int argc, char* argv[])
 					//panorama task
 					else if(udp_msg_array.size() >= 2
 							&& udp_msg_array[0].compare(SNAV_CMD_PANORAMA) == 0
+							&& !fly_test_mission
+							&& !rotation_test_mission
 							&& !circle_mission
 							&& !return_mission
 							&& !trail_navigation_mission
@@ -3504,9 +3450,47 @@ int main(int argc, char* argv[])
 						DEBUG("Panorama_mission: clockwise,point_count,angle_per:%d,%d,%f\n",
 								clockwise,point_count,angle_per);
 					}
-					//circel task
+					// Fly test task
+					else if(udp_msg_array.size() >= 1
+							&& udp_msg_array[0].compare(SNAV_CMD_FLY_TEST) == 0
+							&& !rotation_test_mission
+							&& !circle_mission
+							&& !panorama_mission
+							&& !return_mission
+							&& !trail_navigation_mission
+							&& !face_mission
+							&& !body_mission)
+					{
+						fly_test_count = 0;
+
+						curSendMode = SN_RC_OPTIC_FLOW_POS_HOLD_CMD;
+						fly_test_mission = true;
+
+						DEBUG("SNAV_CMD_FLY_TEST\n");
+					}
+					// Rotation test task
+					else if(udp_msg_array.size() >= 1
+							&& udp_msg_array[0].compare(SNAV_CMD_ROTATION_TEST) == 0
+							&& !fly_test_mission
+							&& !circle_mission
+							&& !panorama_mission
+							&& !return_mission
+							&& !trail_navigation_mission
+							&& !face_mission
+							&& !body_mission)
+					{
+						rotation_test_count = 0;
+
+						curSendMode = SN_RC_OPTIC_FLOW_POS_HOLD_CMD;
+						rotation_test_mission = true;
+
+						DEBUG("SNAV_CMD_ROTATION_TEST\n");
+					}
+					// Circel task
 					else if(udp_msg_array.size() >= 3
 							&& udp_msg_array[0].compare(SNAV_CMD_CIRCLE) == 0
+							&& !fly_test_mission
+							&& !rotation_test_mission
 							&& !panorama_mission
 							&& !return_mission
 							&& !trail_navigation_mission
@@ -3538,12 +3522,13 @@ int main(int argc, char* argv[])
 					else if(udp_msg_array.size() >= 1
 							&& udp_msg_array[0].compare(SNAV_CMD_RETURN) == 0
 							&& !panorama_mission
+							&& !fly_test_mission
+							&& !rotation_test_mission
 							&& !circle_mission
 							&& !trail_navigation_mission
 							&& !face_mission
 							&& !body_mission)
 					{
-#ifdef GPS_MAG_SWITCH
 						if (gps_enabled)
 						{
 							if ((gps_status != SN_DATA_VALID) || !take_off_with_gps_valid)
@@ -3576,7 +3561,6 @@ int main(int argc, char* argv[])
 							}
 						}
 						else
-#endif
 						{
 							curSendMode =SN_RC_OPTIC_FLOW_POS_HOLD_CMD;
 							return_mission = true;
@@ -3585,8 +3569,7 @@ int main(int argc, char* argv[])
 							entering_loiter = true;
 						}
 
-									// Every circle recalc the distance and yaw_diff from home for Return mission
-#ifdef GPS_MAG_SWITCH
+						// Every circle recalc the distance and yaw_diff from home for Return mission
 						if (gps_enabled)
 						{
 							distance_gps_home_squared = (x_est_gps_startup-x_est_gps)*(x_est_gps_startup-x_est_gps)
@@ -3606,7 +3589,6 @@ int main(int argc, char* argv[])
 							}
 						}
 						else
-#endif
 						{
 							distance_home_squared = (x_est_startup-x_est)*(x_est_startup-x_est) + (y_est_startup-y_est)*(y_est_startup-y_est);
 							yaw_target_home = atan2(y_est_startup-y_est, x_est_startup-x_est);
@@ -3635,6 +3617,8 @@ int main(int argc, char* argv[])
 					else if(udp_msg_array.size() >= 1
 							&& udp_msg_array[0].compare(SNAV_CMD_TRAIL_NAVIGATION) == 0
 							&& !panorama_mission
+							&& !fly_test_mission
+							&& !rotation_test_mission
 							&& !circle_mission
 							&& !return_mission
 							&& !face_mission
@@ -3688,6 +3672,8 @@ int main(int argc, char* argv[])
 								|| fabs(cur_body.distance -safe_distance) >0.05
 								|| fabs(cur_body.hegith_calib)>0.1)
 							&& !panorama_mission
+							&& !fly_test_mission
+							&& !rotation_test_mission
 							&& !circle_mission
 							&& !return_mission
 							&& !trail_navigation_mission)
@@ -3709,6 +3695,8 @@ int main(int argc, char* argv[])
 						if ((fabs(body_offset)>min_angle_offset
 								|| fabs(cur_body.velocity)>0.05f)
 							&& !panorama_mission
+							&& !fly_test_mission
+							&& !rotation_test_mission
 							&& !circle_mission
 							&& !return_mission
 							&& !trail_navigation_mission)
@@ -4059,71 +4047,6 @@ int main(int argc, char* argv[])
 
 					DEBUG("[%d][%d] [circle_mission current_position vel_x_target vel_y_target vel_z_target vel_yaw_target]: [%f %f %f %f]\n",
 									loop_counter,current_position, vel_x_target,vel_y_target,vel_z_target,vel_yaw_target);
-
-					/*
-					command_diff_x = circle_positions[current_position].x - (x_des-x_est_startup);
-					command_diff_y = circle_positions[current_position].y - (y_des-y_est_startup);
-					command_diff_z = circle_positions[current_position].z - (z_des-z_est_startup);
-					command_diff_yaw = circle_positions[current_position].yaw - yaw_des;
-
-
-					DEBUG("[%d] [circle_mission x_des y_des z_des]: [%f %f %f]\n",
-							loop_counter,x_des,y_des,z_des);
-
-					if (command_diff_yaw > M_PI)
-					{
-						command_diff_yaw = command_diff_yaw - 2*M_PI;
-					}
-					else if (command_diff_yaw < -M_PI)
-					{
-						command_diff_yaw = command_diff_yaw+ 2*M_PI;
-					}
-
-					if (fabs(command_diff_yaw)>M_PI*0.25f)
-					{
-						state = MissionState::LOITER;
-						current_position =0;
-						circle_mission=false;
-						calcCirclePoint = false;
-						continue;
-					}
-
-					distance_to_dest = sqrt(command_diff_x*command_diff_x +
-										 command_diff_y*command_diff_y +
-										 command_diff_z*command_diff_z);
-
-					if(distance_to_dest<0.01)
-					{
-						distance_to_dest = 0.01;
-					}  //to prevent dividing by zero
-
-					//if(distance_to_dest<0.04)	//&& fabs(command_diff_yaw) <angle_per
-					if(distance_to_dest<0.06)
-					{
-						// Close enough, move on
-						current_position++;
-						if (current_position >= circle_positions.size())
-						{
-							// No more circle_positions, so land
-							state = MissionState::LOITER;
-							current_position =0;
-							circle_mission=false;
-							calcCirclePoint = false;
-						}
-					}
-
-					vel_x_target = command_diff_x/distance_to_dest * vel_target;
-					vel_y_target = command_diff_y/distance_to_dest * vel_target;
-					vel_z_target = command_diff_z/distance_to_dest * vel_target;
-					vel_yaw_target = command_diff_yaw/angle_per*vel_target;
-					*/
-
-					/*DEBUG("[%d] [distance_to_dest command_diff_x command_diff_y command_diff_z command_diff_yaw]: [%f %f %f %f %f]\n",
-							loop_counter,distance_to_dest,command_diff_x,command_diff_y,command_diff_z,command_diff_yaw);*/
-
-					//if (current_position >= 0.9*circle_positions.size()) //slow down
-					//	vel_yaw_target =0;
-					//if(vel_yaw_target>0.8f)vel_yaw_target=0.8f;
 				}
 				else if (trail_navigation_mission)
 				{
@@ -4427,8 +4350,6 @@ int main(int argc, char* argv[])
 					// Two step: turn yaw to home first, then fly directly to home.
 					if (fly_home)
 					{
-#ifdef	GPS_MAG_SWITCH
-						//if (gps_enabled && (gps_status == SN_DATA_VALID) && (gps_mag_flag == 1))
 						if (gps_enabled)
 						{
 							float distance_gps_home = sqrt((x_est_gps_startup-x_est_gps)*(x_est_gps_startup-x_est_gps)
@@ -4456,7 +4377,6 @@ int main(int argc, char* argv[])
 							// Go to home waypoint
 						}
 						else
-#endif
 						{
 							float distance_home = sqrt((x_est_startup-x_est)*(x_est_startup-x_est)
 															+ (y_est_startup-y_est)*(y_est_startup-y_est));
@@ -4496,25 +4416,43 @@ int main(int argc, char* argv[])
 						float distance_from_home = sqrt((x_est_gps_startup-x_est_gps)*(x_est_gps_startup-x_est_gps)
 																					+ (y_est_gps_startup-y_est_gps)*(y_est_gps_startup-y_est_gps));
 
-						if (((wp_goal_ret&wp_goal_mask) == 0) ||  (distance_from_home < 2))
-				        {
-							// If home, enter landing
-							wp_goal_ret = 0b11111111;
-							state = MissionState::LANDING;
-							return_mission = false;
+						if (gps_enabled)
+						{
+							if (((wp_goal_ret&wp_goal_mask) == 0) ||  (distance_from_home < 2))
+					        {
+								// If home, enter landing
+								wp_goal_ret = 0b11111111;
+								state = MissionState::LANDING;
+								return_mission = false;
 
-							gohome_x_vel_des = 0;
-					        gohome_y_vel_des = 0;
-					        gohome_z_vel_des = 0;
-					        gohome_yaw_vel_des = 0;
+								gohome_x_vel_des = 0;
+						        gohome_y_vel_des = 0;
+						        gohome_z_vel_des = 0;
+						        gohome_yaw_vel_des = 0;
 
-							fly_home = false;
-				        }
+								fly_home = false;
+					        }
+						}
+						else
+						{
+							if ((wp_goal_ret&wp_goal_mask) == 0)
+					        {
+								// If home, enter landing
+								wp_goal_ret = 0b11111111;
+								state = MissionState::LANDING;
+								return_mission = false;
+
+								gohome_x_vel_des = 0;
+						        gohome_y_vel_des = 0;
+						        gohome_z_vel_des = 0;
+						        gohome_yaw_vel_des = 0;
+
+								fly_home = false;
+					        }
+						}
 					}
 					else
 					{
-#ifdef	GPS_MAG_SWITCH
-						//if (gps_enabled && (gps_status == SN_DATA_VALID) && (gps_mag_flag == 1))
 						if (gps_enabled)
 						{
 							goto_waypoint_with_gps({x_des_gps, y_des_gps, z_des_gps, yaw_des_gps}
@@ -4523,7 +4461,6 @@ int main(int argc, char* argv[])
 													, true, &output_vel, &wp_goal_ret);
 						}
 						else
-#endif
 						{
 							goto_waypoint({x_des, y_des, z_des, yaw_des}
 											, {x_des, y_des, z_des, yaw_target_home}
@@ -4645,6 +4582,9 @@ int main(int argc, char* argv[])
 			{
 				state = MissionState::ON_GROUND;
 
+				fly_test_mission = false;
+				rotation_test_mission = false;
+
 				circle_mission=false;
 				calcCirclePoint = false;
 
@@ -4670,6 +4610,9 @@ int main(int argc, char* argv[])
 					|| state == MissionState::LOITER))
 			{
 				current_position =0;
+
+				fly_test_mission = false;
+				rotation_test_mission = false;
 
 				circle_mission = false;
 				calcCirclePoint = false;
@@ -4764,7 +4707,7 @@ int main(int argc, char* argv[])
 					}
 					else
 					{
-						if (circle_mission || return_mission)
+						if (circle_mission || return_mission || fly_test_mission || rotation_test_mission)
 						{
 							cmd0 = cmd0*speed_coefficient;
 							cmd1 = cmd1*speed_coefficient;
@@ -5009,15 +4952,6 @@ int main(int argc, char* argv[])
 			}
 			//Add end
 
-			/*
-			if ((x_vel > fMaxVel) || y_vel > fMaxVel)
-			{
-				sn_apply_cmd_mapping(curSendMode, RC_OPT_LINEAR_MAPPING,
-						cmd0, cmd1, cmd2, cmd3,
-						&cmd0, &cmd1, &cmd2, &cmd3);
-			}
-			*/
-
 			if (return_mission)
 			{
 				if (gps_enabled)
@@ -5062,9 +4996,60 @@ int main(int argc, char* argv[])
 					DEBUG("\n[%d] gps_return cmd0:cmd1:cmd2:cmd3:%f, %f, %f, %f", loop_counter, cmd0, cmd1, cmd2, cmd3);
 				}
 			}
+			else if (rotation_test_mission)
+			{
+				rotation_test_count ++;
+				DEBUG("[%d][rotation_test_mission rotation_test_count[%d]\n", loop_counter,rotation_test_count);
+
+				if (rotation_test_count < 600)
+				{
+					cmd0 = 0;
+					cmd1 = 0;
+					cmd2 = 0;
+					cmd3 = 0.2;
+				}
+				else if ((rotation_test_count >= 650) && (rotation_test_count < 1250))
+				{
+					cmd0 = 0;
+					cmd1 = 0;
+					cmd2 = 0;
+					cmd3 = -0.2;
+				}
+				else if (rotation_test_count >= 1250)
+				{
+					rotation_test_count = 0;
+					rotation_test_mission = false;
+				}
+			}
+			else if (fly_test_mission)
+			{
+				fly_test_count ++;
+				DEBUG("[%d][fly_test_mission fly_test_count[%d]\n", loop_counter,fly_test_count);
+
+				if (fly_test_count < 200)
+				{
+					cmd0 = 0.12;
+				}
+				else if ((fly_test_count >= 250) && (fly_test_count < 450))
+				{
+					cmd1 = 0.12;
+				}
+				else if ((fly_test_count >= 500) && (fly_test_count < 700))
+				{
+					cmd0 = -0.12;
+				}
+				else if ((fly_test_count >= 750) && (fly_test_count < 950))
+				{
+					cmd1 = -0.12;
+				}
+				else if (fly_test_count >= 950)
+				{
+					fly_test_count = 0;
+					fly_test_mission = false;
+				}
+			}
 
 			sn_send_rc_command(curSendMode, RC_OPT_LINEAR_MAPPING, cmd0, cmd1, cmd2, cmd3);
-
 
 			// Print some information
 			if (mode == SN_GPS_POS_HOLD_MODE)
