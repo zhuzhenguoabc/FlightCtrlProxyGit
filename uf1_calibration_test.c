@@ -13,6 +13,12 @@
 
 #include "snapdragon_navigator.h"
 
+#define CAM_ERROR    	"Camera not found"
+
+#define CFG_FILE_PATH   "/usr/bin/calibration_cfg.txt"
+#define CFG_NUMBERS    	8
+
+
 void print_sn_calib_status_string(SnCalibStatus status)
 {
   if (status == SN_CALIB_STATUS_NOT_CALIBRATED)
@@ -41,6 +47,98 @@ void print_sn_data_status_string(SnDataStatus status)
 
 int main(int argc, char* argv[])
 {
+	int i;
+	char name[10];
+	int  value;
+
+	int imu_switch = 1;
+	int baro_switch = 1;
+	int mag_switch = 1;
+	int gps_switch = 1;
+	int sonar_switch = 1;
+	int optic_flow_switch = 1;
+	int esc_switch = 1;
+	int cam_switch = 1;
+
+	int cam_value = 1;
+
+	FILE *fpRead=fopen(CFG_FILE_PATH, "a+");
+
+	if(fpRead != NULL)
+	{
+		for(i=0;i<CFG_NUMBERS;i++)
+		{
+			if (fscanf(fpRead, "%s%d", name, &value) != EOF)
+			{
+				if ((strcmp(name, "imu") == 0))
+				{
+					if (value != 1)
+					{
+						imu_switch = 0;
+					}
+				}
+				else if ((strcmp(name, "baro") == 0))
+				{
+					if (value != 1)
+					{
+						baro_switch = 0;
+					}
+				}
+				else if ((strcmp(name, "mag") == 0))
+				{
+					if (value != 1)
+					{
+						mag_switch = 0;
+					}
+				}
+				else if ((strcmp(name, "gps") == 0))
+				{
+					if (value != 1)
+					{
+						gps_switch = 0;
+					}
+				}
+				else if ((strcmp(name, "sonar") == 0))
+				{
+					if (value != 1)
+					{
+						sonar_switch = 0;
+					}
+				}
+				else if ((strcmp(name, "optic_flow") == 0))
+				{
+					if (value != 1)
+					{
+						optic_flow_switch = 0;
+					}
+				}
+				else if ((strcmp(name, "esc") == 0))
+				{
+					if (value != 1)
+					{
+						esc_switch = 0;
+					}
+				}
+				else if ((strcmp(name, "cam") == 0))
+				{
+					if (value != 1)
+					{
+						cam_switch = 0;
+					}
+				}
+			}
+			else
+			{
+				printf("fscanf == EOF!!!\n");
+			}
+		}
+		fclose(fpRead);
+	}
+	else
+	{
+		printf("fpRead == NULL!!!\n");
+	}
+
 	printf("\n*****START*******\n");
   SnavCachedData* snav_data = NULL;
   if (sn_get_flight_data_ptr(sizeof(SnavCachedData), &snav_data) != 0)
@@ -53,6 +151,32 @@ int main(int argc, char* argv[])
   int loop_counter = 0;
   unsigned int ii = 0;
   int pass_false_flag = 0;
+
+	// Check the cam status
+	if (cam_switch == 1)
+	{
+		char get_cam_status_cmd[128] = "camera-test -t 3 -f hires | grep 'Camera not found'";
+		char cam_status[64];
+
+		FILE *fp = popen(get_cam_status_cmd, "r");
+		fgets(cam_status, sizeof(cam_status), fp);
+		pclose(fp);
+
+		printf("camera-test strlen(cam_status)=%d\n", strlen(cam_status));
+		printf("camera-test result=%s\n", cam_status);
+
+		if (strlen(cam_status) > 1)
+		{
+			cam_value = 0;
+		}
+		else
+		{
+			cam_value = 1;
+		}
+
+		printf("cam_value=%d\n", cam_value);
+	}
+	// Check End
 
   for(loop_counter=0;;loop_counter++)
   {
@@ -225,57 +349,76 @@ int main(int argc, char* argv[])
 		wifi_ssid[strlen(wifi_ssid)-1] = '\0';
 	}
 
-      printf("\nWifi-Name		=		%s\n\n", wifi_ssid);
-
-	  printf("------------------------------------------------------------\n");
-      printf("Snav Version	=	%s\n", library_version);
-
-	  printf("------------------------------------------------------------\n");
-	  printf("1: imu_status	= %d -----------", imu_status);
-
-	  if (imu_status == SN_DATA_VALID)
-	  {
-		  if ((snav_data->imu_0_raw.lin_acc[0] >= -0.1f) && (snav_data->imu_0_raw.lin_acc[0] <= 0.1f)
-			   && (snav_data->imu_0_raw.lin_acc[1] >= -0.1f) && (snav_data->imu_0_raw.lin_acc[1] <= 0.1f)
-			   && (snav_data->imu_0_raw.lin_acc[2] >= 0.9f) && (snav_data->imu_0_raw.lin_acc[2] <= 1.1f)
-			 &&(snav_data->imu_0_raw.ang_vel[0] >= -0.1f) && (snav_data->imu_0_raw.ang_vel[0] <= 0.1f)
-			 && (snav_data->imu_0_raw.ang_vel[1] >= -0.1f) && (snav_data->imu_0_raw.ang_vel[1] <= 0.1f)
-			 && (snav_data->imu_0_raw.ang_vel[2] >= -0.1f) && (snav_data->imu_0_raw.ang_vel[2] <= 0.1f))
-		  {
-			  printf("Pass\n");
-		  }
-		  else
-		  {
-			pass_false_flag = 1;
-			printf("Fail003\n");
-		  }
-	  }
-	  else if (imu_status == SN_DATA_NOT_INITIALIZED)
-	  {
-		  pass_false_flag = 1;
-		  printf("Fail001\n");
-	  }
-      else if (imu_status == SN_DATA_UNCALIBRATED)
-      {
-		  pass_false_flag = 1;
-		  printf("Fail002\n");
-	  }
-	  else
-	  {
-		  pass_false_flag = 1;
-		  printf("Fail004\n");
-	  }
+	printf("\nWifi-Name		=		%s\n", wifi_ssid);
 
 	printf("------------------------------------------------------------\n");
-	  printf("2: baro_status = %d -----------", baro_status);
-      //print_sn_data_status_string(baro_status);
-	  if (baro_status == SN_DATA_VALID)
-		printf("Pass\n");
-	  else
+	printf("Snav Version	=	%s\n", library_version);
+
+	printf("\n------------------------------------------------------------\n");
+	printf("IMU:                %d\n", imu_switch);
+	printf("BARO:               %d\n", baro_switch);
+	printf("MAG:                %d\n", mag_switch);
+	printf("GPS:                %d\n", gps_switch);
+	printf("SONAR:              %d\n", sonar_switch);
+	printf("OPTIC_FLOW:         %d\n", optic_flow_switch);
+	printf("ESC:                %d\n", esc_switch);
+	printf("CAM:                %d\n", cam_switch);
+	printf("------------------------------------------------------------\n");
+
+	if (imu_switch == 1)
+	{
+		printf("------------------------------------------------------------\n");
+		printf("1: imu_status	= %d -----------", imu_status);
+
+		if (imu_status == SN_DATA_VALID)
 		{
-		  pass_false_flag = 1;
-		  printf("Fail\n");
-	  }
+			if ((snav_data->imu_0_raw.lin_acc[0] >= -0.05f) && (snav_data->imu_0_raw.lin_acc[0] <= 0.05f)
+				&& (snav_data->imu_0_raw.lin_acc[1] >= -0.05f) && (snav_data->imu_0_raw.lin_acc[1] <= 0.05f)
+				&& (snav_data->imu_0_raw.lin_acc[2] >= 0.95f) && (snav_data->imu_0_raw.lin_acc[2] <= 1.05f)
+				&&(snav_data->imu_0_raw.ang_vel[0] >= -0.05f) && (snav_data->imu_0_raw.ang_vel[0] <= 0.05f)
+				&& (snav_data->imu_0_raw.ang_vel[1] >= -0.05f) && (snav_data->imu_0_raw.ang_vel[1] <= 0.05f)
+				&& (snav_data->imu_0_raw.ang_vel[2] >= -0.05f) && (snav_data->imu_0_raw.ang_vel[2] <= 0.05f))
+			{
+				printf("Pass\n");
+			}
+			else
+			{
+				pass_false_flag = 1;
+				printf("Fail003\n");
+			}
+		}
+		else if (imu_status == SN_DATA_NOT_INITIALIZED)
+		{
+			pass_false_flag = 1;
+			printf("Fail001\n");
+		}
+		else if (imu_status == SN_DATA_UNCALIBRATED)
+		{
+			pass_false_flag = 1;
+			printf("Fail002\n");
+		}
+		else
+		{
+			pass_false_flag = 1;
+			printf("Fail004\n");
+		}
+	}
+
+	if (baro_switch == 1)
+	{
+		printf("------------------------------------------------------------\n");
+		printf("2: baro_status = %d -----------", baro_status);
+		//print_sn_data_status_string(baro_status);
+		if (baro_status == SN_DATA_VALID)
+		{
+			printf("Pass\n");
+		}
+		else
+		{
+			pass_false_flag = 1;
+			printf("Fail\n");
+		}
+	}
 
 	  /*
 	printf("------------------------------------------------------------\n");
@@ -289,84 +432,116 @@ int main(int argc, char* argv[])
 		  printf("Fail\n");
 	  }*/
 
-	printf("------------------------------------------------------------\n");
-	  printf("3: mag_status = %d -----------", mag_status);
-      //print_sn_data_status_string(mag_status);
-      /*
-	  if ((mag_status == SN_DATA_VALID) || (mag_status == SN_DATA_WARNING))
-	  {
-		  printf("Pass\n");
-	  }
-	  else if (mag_status == SN_DATA_NOT_INITIALIZED)
-	  {
-		  pass_false_flag = 1;
-		  printf("Fail001\n");
-	  }
-	  else
-	  {
-		  pass_false_flag = 1;
-		  printf("Fail002\n");
-	  }
-	  */
-	  printf("Pass\n");
-
-	printf("------------------------------------------------------------\n");
-	  printf("4: gps_status = %d -----------", gps_status);
-      //print_sn_data_status_string(gps_status);
-      /*
-	  if ((gps_status == SN_DATA_VALID)|| (gps_status == SN_DATA_NOT_INITIALIZED) || (gps_status == SN_DATA_NO_LOCK ))
-		printf("Pass\n");
-	  else
+	if (mag_switch == 1)
+	{
+		printf("------------------------------------------------------------\n");
+		printf("3: mag_status = %d -----------", mag_status);
+		//print_sn_data_status_string(mag_status);
+		if (mag_status == SN_DATA_VALID)
 		{
-		  pass_false_flag = 1;
-		  printf("Fail\n");
-	  }
-	  */
-	  printf("Pass\n");
-
-	printf("------------------------------------------------------------\n");
-	  printf("5: sonar_status = %d -----------", sonar_status);
-      //print_sn_data_status_string(sonar_status);
-	  if (sonar_status == SN_DATA_VALID)
-		printf("Pass\n");
-	  else
+			printf("Pass\n");
+		}
+		else if (mag_status == SN_DATA_WARNING)
 		{
-		  pass_false_flag = 1;
-		  printf("Fail\n");
-	  }
-	printf("------------------------------------------------------------\n");
-	  printf("6: optic_flow_status = %d -----------", optic_flow_status);
-      //print_sn_data_status_string(optic_flow_status);
-	  if (optic_flow_status == SN_DATA_VALID)
-		printf("Pass\n");
-	  else
+			printf("Pass-W\n");
+		}
+		else
 		{
-		  pass_false_flag = 1;
-		  printf("Fail\n");
-	  }
+			pass_false_flag = 1;
+			printf("Fail\n");
+		}
+	}
 
-	printf("------------------------------------------------------------\n");
-	  printf("7: esc_feedback_status = %d -----------", esc_feedback_status);
-	  if (esc_feedback_status == SN_DATA_VALID)
-	  {
-		  if ((snav_data->esc_raw.voltage[0]>=6.0f && snav_data->esc_raw.voltage[0]<=8.5f)
-			  && (snav_data->esc_raw.voltage[1]>=6.0f && snav_data->esc_raw.voltage[1]<=8.5f)
-			  && (snav_data->esc_raw.voltage[2]>=6.0f && snav_data->esc_raw.voltage[2]<=8.5f)
-			  && (snav_data->esc_raw.voltage[3]>=6.0f && snav_data->esc_raw.voltage[3]<=8.5f))
-		  {
-			  printf("Pass\n");
-		  }
-		  else
-		  {
-			  pass_false_flag = 1;
-			  printf("Fail002\n");
-		  }
-	  }
-	  else
-	  {
-		  pass_false_flag = 1;
-		printf("Fail001\n");
-	  }
+
+	if (gps_switch == 1)
+	{
+		printf("------------------------------------------------------------\n");
+		printf("4: gps_status = %d -----------", gps_status);
+		//print_sn_data_status_string(gps_status);
+		if ((gps_status == SN_DATA_VALID) || (gps_status == SN_DATA_NO_LOCK ))
+		{
+			printf("Pass\n");
+		}
+		else
+		{
+			pass_false_flag = 1;
+			printf("Fail\n");
+		}
+	}
+
+
+	if (sonar_switch == 1)
+	{
+		printf("------------------------------------------------------------\n");
+		printf("5: sonar_status = %d -----------", sonar_status);
+		//print_sn_data_status_string(sonar_status);
+		if (sonar_status == SN_DATA_VALID)
+		{
+			printf("Pass\n");
+		}
+		else
+		{
+			pass_false_flag = 1;
+			printf("Fail\n");
+		}
+	}
+
+	if (optic_flow_switch == 1)
+	{
+		printf("------------------------------------------------------------\n");
+		printf("6: optic_flow_status = %d -----------", optic_flow_status);
+		//print_sn_data_status_string(optic_flow_status);
+		if (optic_flow_status == SN_DATA_VALID)
+		{
+			printf("Pass\n");
+		}
+		else
+		{
+			pass_false_flag = 1;
+			printf("Fail\n");
+		}
+	}
+
+	if (esc_switch == 1)
+	{
+		printf("------------------------------------------------------------\n");
+		printf("7: esc_feedback_status = %d -----------", esc_feedback_status);
+		if (esc_feedback_status == SN_DATA_VALID)
+		{
+			if ((snav_data->esc_raw.voltage[0]>=6.0f && snav_data->esc_raw.voltage[0]<=8.5f)
+				&& (snav_data->esc_raw.voltage[1]>=6.0f && snav_data->esc_raw.voltage[1]<=8.5f)
+				&& (snav_data->esc_raw.voltage[2]>=6.0f && snav_data->esc_raw.voltage[2]<=8.5f)
+				&& (snav_data->esc_raw.voltage[3]>=6.0f && snav_data->esc_raw.voltage[3]<=8.5f))
+			{
+				printf("Pass\n");
+			}
+			else
+			{
+				pass_false_flag = 1;
+				printf("Fail002\n");
+			}
+		}
+		else
+		{
+			pass_false_flag = 1;
+			printf("Fail001\n");
+		}
+	}
+
+	if (cam_switch == 1)
+	{
+		printf("------------------------------------------------------------\n");
+		printf("8: cam_status = %d -----------", cam_value);
+		if (cam_value == 1)
+		{
+			printf("Pass\n");
+		}
+		else
+		{
+			pass_false_flag = 1;
+			printf("Fail\n");
+		}
+	}
 	  /*
 	  printf("-----------------------------------------------------------------------------------------\n");
 	  printf("静态校准       static_accel_calib_status       = ");

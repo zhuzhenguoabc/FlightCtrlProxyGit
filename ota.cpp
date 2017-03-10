@@ -28,6 +28,8 @@ using namespace std;
 
 #define OTA_LINARO_PATH 					"/tmp/update-linaro.zip"
 #define OTA_SNAV_PATH             			"/tmp/update-snav.zip"
+#define OTA_RESTART_SNAV             		"restart_snav"
+
 
 #define __DEBUG
 
@@ -88,6 +90,12 @@ int main(int argc, char* argv[])
 				system("tar xvf /tmp/update-snav.zip -C /tmp/");	//zxvf
 				system("chmod -R 777 /tmp/update-snav/");
 				system("/tmp/update-snav/update.sh");
+			}
+			else if (strcmp(udp_buff_data, OTA_RESTART_SNAV) == 0)
+			{
+				system("stop snav");
+				sleep(3);
+				system("start snav");
 			}
 		}
 		else

@@ -22,3 +22,183 @@
 
   fclose(stdout);
 	fclose(stderr);
+	
+	由于开机后，时间可能是初始化值1970-01-01, 所以上述用时间命名存在缺陷，采用下面的用文件计数的方式
+	创建计数文件，每次程序启动累计，用于给LOG命名。
+	// Confirm logfile name start
+	FILE *fp_count_read, *fp_count_write;
+	int log_count=0;
+	
+	if ((fp_count_read = fopen("/home/linaro/flightctrl_proxy_count", "a+")) != NULL)
+	{
+		if (fscanf(fp_count_read, "%d", &log_count) != EOF)
+		{
+			DEBUG("flightctrl_proxy_count=%d\n", log_count);
+	
+			if ((log_count < 8000) && log_count >= 0)
+			{
+				log_count++;
+			}
+			else
+			{
+				log_count = 0;
+			}
+		}
+		else
+		{
+			DEBUG("flightctrl_proxy_count first time\n");
+			log_count = 1;
+		}
+	
+		fclose(fp_count_read);
+	
+		char str[16];
+		if ((fp_count_write = fopen("/home/linaro/flightctrl_proxy_count", "w+")) != NULL)
+		{
+			sprintf(str, "%d", log_count);
+			fwrite(str, strlen(str), 1, fp_count_write);
+			fclose(fp_count_write);
+		}
+	}
+	
+	// Only keep the last 5 log files
+	system("find /home/linaro/ -type f -name 'log_flightctrl*'|xargs -r ls -l|head -n -5|awk '{print $9}'| xargs rm -rf");
+
+	char log_filename[256];
+ 	sprintf(log_filename, "/home/linaro/log_flightctrl_%04d", log_count);
+	DEBUG("log_filename=%s\n", log_filename);
+	// Confirm logfile name end
+	
+	freopen(log_filename, "a", stdout);
+	setbuf(stdout, NULL);		//needn't cache and fflush, output immediately
+	freopen(log_filename, "a", stderr);
+	setbuf(stderr, NULL);		//needn't cache and fflush, output immediately
+	.......................................................
+	.......................................................
+	.......................................................
+	fclose(stdout);
+	fclose(stderr);
+	
+2: 创建线程：
+	// Create the face_body_follow process of snav
+	bool face_body_follow_flag = false;
+	while (!face_body_follow_flag)
+	{
+		pthread_t face_follow_thread, body_follow_thread;
+	    pthread_attr_t thread_attr;
+	    int result;
+
+			//初始化一个线程对象属性
+	    result = pthread_attr_init(&thread_attr);
+	    if (result != 0)
+	    {
+	        perror("face_body_follow Attribute init failed");
+	        continue;
+	    }
+
+		  //设置线程分离状态为分离的，线程运行结束后会自动释放所有资源
+	    result = pthread_attr_setdetachstate(&thread_attr, PTHREAD_CREATE_DETACHED);
+	    if (result != 0)
+	    {
+	        perror("face_body_follow Setting detached attribute failed");
+	        pthread_attr_destroy(&thread_attr);
+	        continue;
+	    }
+
+		result = pthread_create(&face_follow_thread, &thread_attr, getVideoFaceFollowParam, NULL);
+		if (result != 0)
+	    {
+	    	perror("face_follow_thread create failed");
+	    	pthread_attr_destroy(&thread_attr);
+	        continue;
+	    }
+
+		result = pthread_create(&body_follow_thread, &thread_attr, getVideoBodyFollowParam, NULL);
+	    if (result != 0)
+	    {
+	    	pthread_cancel(face_follow_thread);
+
+	    	perror("body_follow_thread create failed");
+	    	pthread_attr_destroy(&thread_attr);
+	        continue;
+	    }
+
+		face_body_follow_flag = true;
+		pthread_attr_destroy(&thread_attr);
+	}
+	
+3：使用UDP进行本地进程之间的通信。
+	void* interactWithOta(void*)
+{
+	DEBUG("interactWithOta start\n");
+
+	int socket_cli;
+
+	struct sockaddr_in address;
+	bzero(&address, sizeof(address));
+	address.sin_family = AF_INET;
+	address.sin_addr.s_addr = inet_addr("127.0.0.1");
+	address.sin_port = htons(OTA_UDP_PORT);
+
+	socket_cli = socket(AF_INET, SOCK_DGRAM, 0);
+	int send_num = 0;
+
+	while (true)
+	{
+		if (send_ota_linaro_flag)
+		{
+			send_num = sendto(socket_cli, ota_linaro_path_buff, strlen(ota_linaro_path_buff), 0, (struct sockaddr*)&address, sizeof(address));
+			DEBUG("ota_linaro_path_buff=%s send_num=%d\n", ota_linaro_path_buff,send_num);
+			send_ota_linaro_flag = false;
+		}
+
+		if (send_ota_snav_flag)
+		{
+			send_num = sendto(socket_cli, ota_snav_path_buff, strlen(ota_snav_path_buff), 0, (struct sockaddr*)&address, sizeof(address));
+			DEBUG("ota_snav_path_buff=%s send_num=%d\n", ota_snav_path_buff,send_num);
+			send_ota_snav_flag = false;
+		}
+
+		if (send_restart_snav)
+		{
+			send_num = sendto(socket_cli, ota_restart_snav, strlen(ota_restart_snav), 0, (struct sockaddr*)&address, sizeof(address));
+			DEBUG("ota_restart_snav=%s send_num=%d\n", ota_restart_snav,send_num);
+			send_restart_snav = false;
+		}
+
+		usleep(200000);		//200ms  确保不会占用太多CPU
+	}
+}
+
+4：创建与手机APP通信的UDP连接（有持续指令保持飞机悬停）。
+	// Udp communication with Android/IOS app
+	int server_udp_sockfd;
+	int server_udp_len;
+    struct sockaddr_in server_udp_address;
+
+    server_udp_address.sin_family		= AF_INET;
+    server_udp_address.sin_addr.s_addr	= htonl(INADDR_ANY);
+    server_udp_address.sin_port			= htons(SERVER_UDP_PORT);
+    server_udp_len						= sizeof(server_udp_address);
+
+	server_udp_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    int bind_result = bind(server_udp_sockfd, (struct sockaddr*)&server_udp_address, server_udp_len);
+
+	// 300ms overtime avoid of udp missing data
+	// 因为设置的是阻塞型SOCKET，飞机需要不停的接收指令保持悬停，所以设置了300毫秒的超时
+	// 既确保不会坠机，也要避免指令有轻微延迟，造成误超时，形成飞行卡顿现象。）
+	setsockopt(server_udp_sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout_udp, sizeof(struct timeval));
+	setsockopt(server_udp_sockfd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout_udp, sizeof(struct timeval));
+
+	// The Udp Circle
+	while (true)
+	{
+		int length = 0;
+		struct sockaddr_in remote_addr;
+		int sin_size = sizeof(struct sockaddr_in);
+		char udp_buff_data[MAX_BUFF_LEN];
+
+		//receive the udp data
+		//300毫秒内没收到指令时，会跳出阻塞。
+		length = recvfrom(server_udp_sockfd, udp_buff_data, MAX_BUFF_LEN-1, 0,
+							(struct sockaddr *)&remote_addr, (socklen_t*)&sin_size);
