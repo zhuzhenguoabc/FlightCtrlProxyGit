@@ -35,7 +35,7 @@ using namespace std;
 #ifdef __DEBUG
 #define DEBUG(format, ...) printf(format, ##__VA_ARGS__)
 #else
-#define DEBUG(format,...)
+#define DEBUG(format, ...)
 #endif
 
 #define SERVER_UDP_PORT 						14559
@@ -49,7 +49,7 @@ using namespace std;
 
 #define DOMAIN_BUFF_SIZE						16
 
-#define VERSION_NUM 							"1.1.3"
+#define VERSION_NUM 							"1.1.4"
 #define STR_SEPARATOR  							","
 
 
@@ -114,6 +114,7 @@ using namespace std;
 #define SNAV_TASK_GET_QCAM_VERSION				"8012"
 #define SNAV_TASK_GET_STORAGE					"8013"
 #define SNAV_TASK_GET_SD_STATUS					"8014"
+#define SNAV_TASK_GET_SD_STORAGE				"8015"
 
 
 #define SNAV_TASK_GET_INFO_RETURN				"9001"
@@ -126,6 +127,8 @@ using namespace std;
 #define SNAV_TASK_GET_QCAM_VERSION_RETURN		"9012"
 #define SNAV_TASK_GET_STORAGE_RETURN			"9013"
 #define SNAV_TASK_GET_SD_STATUS_RETURN			"9014"
+#define SNAV_TASK_GET_SD_STORAGE_RETURN			"9015"
+
 
 #define SNAV_INFO_OVER_SAFE_HEIGHT				"9101"
 
@@ -143,6 +146,7 @@ using namespace std;
 
 
 #define SDCARD_DIR								"/media/sdcard"
+#define SDCARD_MOUNT_PATH						"/mnt/sdcard"
 
 //#define LOW_BATTERY_LANDING
 //#define HEIGHT_LIMIT
@@ -255,6 +259,8 @@ static int select_pos[4];
 static bool sendpos_back_flag = false;
 static bool getpos_body_flag = false;
 float speed_last =0;
+const float low_battery = 6.75f;
+
 
 typedef struct
 {
@@ -309,7 +315,8 @@ struct prodcons {
 
 struct prodcons pro_udp_receive;
 
-struct timeval timeout_udp = {0,300000};			//300ms
+//struct timeval timeout_udp = {0,300000};			//300ms
+struct timeval timeout_udp = {0,200000};			//200ms
 
 
 // *****************tool functions start******************************
@@ -702,7 +709,8 @@ void* interactWithQcamvidThread(void*)
 			send_body_follow_swither_flag = false;
 		}
 
-		usleep(2000);		//2ms
+		//usleep(2000);		//2ms
+		usleep(20000);		//20ms
 	}
 }
 
@@ -835,8 +843,10 @@ void* ledControlThread(void*)
 			led_colors[2] = 0;
 		}
 
+        /*
 		DEBUG("sn_set_led_colors bNeedLedColorCtl:%d,led_color_status:%d, Color:%d,%d,%d\n",
 				bNeedLedColorCtl, led_color_status, led_colors[0], led_colors[1], led_colors[2]);
+        */
 
 		if (bNeedLedColorCtl)
 		{
@@ -863,6 +873,7 @@ int main(int argc, char* argv[])
 
 	float speed_coefficient = 1.0f;
 	float height_limit = 20.0f; 		// m
+	float gps_mode_height = 5;	//10.0f; 		// m
 
 	const float fMaxCmdValue = 0.6;
 	const float fMaxVel = 2;	// m/s
@@ -925,14 +936,12 @@ int main(int argc, char* argv[])
 	static float y_est_startup = 0;
 	static float z_est_startup = 0;
 	static float yaw_est_startup = 0;
-
 	static float yaw_est_loiter_startup = 0;
 
 	static float x_est_gps_startup = 0;
 	static float y_est_gps_startup = 0;
 	static float z_est_gps_startup = 0;
 	static float yaw_est_gps_startup = 0;
-
 	static float yaw_est_loiter_gps_startup = 0;
 
 	// Mission State Machine
@@ -948,7 +957,6 @@ int main(int argc, char* argv[])
 	float destyaw = 0;
 	float speed = 0;
 	float distance_to_dest = 0;
-	SnRcCommandType curSendMode = SN_RC_OPTIC_FLOW_POS_HOLD_CMD;
 
 	// Gps postion fly
 	vector<GpsPosition> gps_positions;
@@ -982,7 +990,7 @@ int main(int argc, char* argv[])
 	float old_roll = 0;
 	float last_pitch = 0;
 	float last_roll = 0;
-	const float stop_control_num = 199;
+	const int stop_control_num = 199;
 
 	const float gohome_vel_des_limit = 0.6;	//0.3;
 	const float gohome_x_vel_des_limit = 0.4242;	//0.2121;
@@ -994,17 +1002,20 @@ int main(int argc, char* argv[])
   	float last_cmd1 = 0;
 	// Add end
 
+    SnMode last_mode = SN_OPTIC_FLOW_POS_HOLD_MODE;
+    double last_time = 0;
+
 	// For revise height with barometer and sonar
 	int use_revise_height = 1;
 
 	int reverse_rule = 1;
 	int reverse_type_sample_size = 1;
-	int reverse_type_desire = 1;
-	int reverse_type_linacc = 1;
+	int reverse_type_desire = 0;	//1;
+	int reverse_type_linacc = 0;	//1;
 
 	int reverse_type = 1;
 	int reverse_full_flag = 1;
-	int reverse_ctrl_flag = 1;
+	int reverse_ctrl_flag = 0;	//1;
 
 	float revise_height = 0;
 	float baro_groud = 0;
@@ -1045,8 +1056,8 @@ int main(int argc, char* argv[])
 		}
 	}
 
-	// Only keep the last 5 log files
-	system("find /home/linaro/ -type f -name 'log_flightctrl*'|xargs -r ls -l|head -n -5|awk '{print $9}'| xargs rm -rf");
+	// Only keep the last 5 log files-----------keep 4 and add a new one.
+	system("find /home/linaro/ -type f -name 'log_flightctrl*'|xargs -r ls -l|head -n -4|awk '{print $9}'| xargs rm -rf");
 
 	char log_filename[256];
  	sprintf(log_filename, "/home/linaro/log_flightctrl_%04d", log_count);
@@ -1229,11 +1240,10 @@ int main(int argc, char* argv[])
 	server_udp_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     int bind_result = bind(server_udp_sockfd, (struct sockaddr*)&server_udp_address, server_udp_len);
 
-	// 300ms overtime avoid of udp missing data
+	// Overtime avoid of block
 	setsockopt(server_udp_sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout_udp, sizeof(struct timeval));
 	setsockopt(server_udp_sockfd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout_udp, sizeof(struct timeval));
 
-	// The Udp Circle
 	while (true)
 	{
 		int length = 0;
@@ -1255,7 +1265,7 @@ int main(int argc, char* argv[])
 
 			udp_buff_data[length]='\0';
 			DEBUG("udp receive data from %s, %d:\n", inet_ntoa(remote_addr.sin_addr), ntohs(remote_addr.sin_port));
-			DEBUG("udp recvfrom get data udp_buff_data=%s, time_now=%lf\n", udp_buff_data, time_now);
+			DEBUG("udp recvfrom udp_buff_data=%s, time_now=%lf\n", udp_buff_data, time_now);
 
 			bReceivedUdpMsg = true;
 
@@ -1275,7 +1285,7 @@ int main(int argc, char* argv[])
 					udpOverTimeCount = 0;
 				}
 			}
-			//lock the udp client ip when the first udp connect
+			// Lock the udp client ip when the first udp connect
 			else
 			{
 				bHaveUdpClient = true;
@@ -1302,13 +1312,27 @@ int main(int argc, char* argv[])
 
 			DEBUG("udpOverTimeCount=%d\n", udpOverTimeCount);
 
-			if (udpOverTimeCount >= 10)		//10*300ms
+			//if (udpOverTimeCount >= 10)		//10*300ms
+			//if (udpOverTimeCount >= 75)		//75*40ms
+			if (udpOverTimeCount >= 15)	//15*200ms
 			{
-				DEBUG("the first udp client overtime and discard\n");
+				DEBUG("current udp client overtime and discard\n");
 				bHaveUdpClient = false;
 				udpOverTimeCount = 0;
 			}
 		}
+
+        // Record the diff between now and last udp msg
+        struct timeval tm_temp;
+		gettimeofday(&tm_temp, NULL);
+		double time_temp_now = tm_temp.tv_sec + tm_temp.tv_usec*1e-6;
+
+        if ((last_time != 0) && (time_temp_now-last_time) > 0.02)
+        {
+            DEBUG("debug_flag111 -----------------time_diff=%lf.\n", (time_temp_now-last_time));
+        }
+        last_time = time_temp_now;
+
 
 		// Always need to call this
 		if (sn_update_data() != 0)
@@ -1355,31 +1379,54 @@ int main(int argc, char* argv[])
 			// Get the "on ground" flag
 			int on_ground_flag = (int)snav_data->general_status.on_ground;
 
+            // Record the gps_invalid_time
+            struct timeval tv_now;
+			gettimeofday(&tv_now, NULL);
+			double t_now_for_gps = tv_now.tv_sec + tv_now.tv_usec*1e-6;
+
+			double t_gps_invalid = 0;
+            if (!gps_enabled || (gps_status != SN_DATA_VALID))
+            {
+                t_gps_invalid = t_now_for_gps;
+            }
+
 			// Add by wlh -----Revise the z position with linear formula of barometer start
 			if (on_ground_flag == 1)
 			{
 				baro_groud = snav_data->barometer_0_raw.pressure;
 			}
 
-			float baro_x = snav_data->barometer_0_raw.pressure - baro_groud;
-			float sonar_y = BAROMETER_LINEAR_MACRO(baro_x);
+			float baro_diff  = 0;
+            if (baro_groud != 0)
+            {
+                baro_diff = snav_data->barometer_0_raw.pressure - baro_groud;
+            }
+
+			float barometer_height = BAROMETER_LINEAR_MACRO(baro_diff);
 
 			if (on_ground_flag == 1 || snav_data->sonar_0_raw.range  < 0.29)
 			{
-				sonar_y = 0;
+				barometer_height = 0;
 			}
 
 			if (on_ground_flag == 0 && snav_data->sonar_0_raw.range > 0.30 && baro_groud != 0)
 			{
-				if (snav_data->sonar_0_raw.range < 2.3)
+				if (snav_data->sonar_0_raw.range < 1.8) // 2.3
 				{
 					if (fabs(revise_height - snav_data->sonar_0_raw.range) < 0.5)
 					{
-						if (fabs(sonar_y - snav_data->sonar_0_raw.range) < 1.2)
+						if (fabs(barometer_height - snav_data->sonar_0_raw.range) < 1.2)
 						{
 							revise_height = snav_data->sonar_0_raw.range;
 						}
 					}
+
+                    // Avoid 1: revise_height do not update when down from >1.8m into sonar area
+                    // Avoid 2: keep 0 when up from gound to sonar>0.5m
+                    if ((revise_height > 3) || (revise_height <= 0))
+                    {
+                        revise_height = snav_data->sonar_0_raw.range;
+                    }
 				}
 				else
 				{
@@ -1390,7 +1437,7 @@ int main(int argc, char* argv[])
 					}
 					else
 					{
-						baro_value_sum += 0.000007*baro_x*baro_x - 0.081320*baro_x - 0.027264;
+						baro_value_sum += 0.000007*baro_diff*baro_diff - 0.081320*baro_diff - 0.027264;
 						baro_count++;
 						if (baro_count > 10)
 						{
@@ -1399,18 +1446,18 @@ int main(int argc, char* argv[])
 						}
 					}
 
-					if (revise_height < 0)
-					{
-						revise_height = 0;
-					}
+                    if (revise_height < 0)
+    				{
+    					revise_height = 0;
+    				}
 				}
 			}
 
-			DEBUG("revise_height=%f, baro_x=%f\n",revise_height, baro_x);
+			DEBUG("revise_height=%f, baro_groud=%f, baro_diff=%f, snav_data->sonar_0_raw.range=%f\n"
+                    ,revise_height, baro_groud, baro_diff, snav_data->sonar_0_raw.range);
 			// Add end -----Revise the z position with linear formula of barometer end
 
-			// Get the current estimated position and yaw
-			float x_est, y_est, z_est, yaw_est;
+            // Get the current gps estimated and desired position and yaw
 			float x_est_gps, y_est_gps, z_est_gps, yaw_est_gps;
 			float x_des_gps, y_des_gps, z_des_gps, yaw_des_gps;
 
@@ -1439,6 +1486,8 @@ int main(int argc, char* argv[])
 				yaw_des_gps = 0;
 			}
 
+            // Get the current estimated position and yaw
+			float x_est, y_est, z_est, yaw_est;
 			x_est = (float)snav_data->optic_flow_pos_vel.position_estimated[0];
 			y_est = (float)snav_data->optic_flow_pos_vel.position_estimated[1];
 			z_est = (float)snav_data->optic_flow_pos_vel.position_estimated[2];
@@ -1458,12 +1507,12 @@ int main(int argc, char* argv[])
 			gettimeofday(&tv_for_des, NULL);
 			double t_des_now = tv_for_des.tv_sec + tv_for_des.tv_usec * 1e-6;
 
-			DEBUG("[%d] t_des_now: x_est,x_des,y_est,y_des=%lf,%f,%f,%f,%f\n",
-							loop_counter, t_des_now, x_est, x_des, y_est, y_des);
+			DEBUG("[%d] t_des_now: x_est,x_des,y_est,y_des,z_est,z_des=%lf,%f,%f,%f,%f,%f,%f\n",
+							loop_counter, t_des_now, x_est, x_des, y_est, y_des, z_est, z_des);
 
 			// Revise print message and whether to use it
-			DEBUG("use_revise_height=%d, revise_height=%f, baro_x=%f, z_est-z_est_startup=%f\n"
-						, use_revise_height, revise_height, baro_x, (z_est-z_est_startup));
+			DEBUG("use_revise_height=%d, revise_height=%f, z_est_startup=%f, z_est-z_est_startup=%f\n"
+						, use_revise_height, revise_height, z_est_startup, (z_est-z_est_startup));
 
 			if (use_revise_height != 1)
 			{
@@ -1471,13 +1520,17 @@ int main(int argc, char* argv[])
 			}
 
 			// Add by wlh-----Judge whether need to reverse the drone start
-			const float cmd_offset = 10;
+			const float reverse_plan_num = 10;
 			float optic_flow_vel_est = fabs(sqrt(snav_data->optic_flow_pos_vel.velocity_estimated[0]*snav_data->optic_flow_pos_vel.velocity_estimated[0]
 											 	 + snav_data->optic_flow_pos_vel.velocity_estimated[1]*snav_data->optic_flow_pos_vel.velocity_estimated[1]));
 
+            float gps_vel_est = fabs(sqrt(snav_data->gps_pos_vel.velocity_estimated[0]*snav_data->gps_pos_vel.velocity_estimated[0]
+											 	 + snav_data->gps_pos_vel.velocity_estimated[1]*snav_data->gps_pos_vel.velocity_estimated[1]));
+
 			// Sample-size error handle start
-			if (reverse_type_sample_size == 1)
+			if (reverse_type_sample_size == 1 && mode == SN_OPTIC_FLOW_POS_HOLD_MODE)
 			{
+			    // Avoid to reverse the drone when takeoff with sample-size bad
 				if ((state == MissionState::LOITER) || (state == MissionState::TRAJECTORY_FOLLOW))
 				{
 					if (sample_size >= 0)
@@ -1486,12 +1539,9 @@ int main(int argc, char* argv[])
 						{
 							sample_size_count++;
 
-							if (sample_size_count > 0)
+							if ((sample_size_count > 0) && (sample_size < 5))
 							{
-								if (sample_size < 5)
-								{
-									sample_size_missing_count++;
-								}
+								sample_size_missing_count++;
 							}
 
 							if (sample_size_count > 20)
@@ -1501,20 +1551,23 @@ int main(int argc, char* argv[])
 									if (reverse_ctrl_step == 0)
 									{
 										reverse_ctrl_count++;
+
+                                        DEBUG("sample_size_missing ---first old_cmd0[%f], old_cmd1[%f], reverse_ctrl_count:%d\n",
+                                                    old_cmd0, old_cmd1, reverse_ctrl_count);
+
 										if (fabs(old_cmd0) < 0.3 && fabs(old_cmd1) < 0.3)
 										{
 											old_cmd0 = snav_data->attitude_estimate.pitch*6;
 											old_cmd1 = -snav_data->attitude_estimate.roll*6;
-											DEBUG("[optic zero 1]---old_cmd0[%f]old_cmd1[%f]\n", old_cmd0, old_cmd1);
 										}
-										else
-										{
-											DEBUG("[optic zero 2]---old_cmd0[%f]old_cmd1[%f]\n", old_cmd0, old_cmd1);
-										}
+
+										DEBUG("debug_flag control session 111 reverse_ctrl_count=%d.\n", reverse_ctrl_count);
+
+										DEBUG("sample_size_missing ---final old_cmd0[%f]old_cmd1[%f], reverse_ctrl_count:%d\n",
+                                                    old_cmd0, old_cmd1, reverse_ctrl_count);
 
 										old_pitch = snav_data->attitude_estimate.pitch;
 										old_roll  = -snav_data->attitude_estimate.roll;
-
 									}
 								}
 
@@ -1522,22 +1575,21 @@ int main(int argc, char* argv[])
 								sample_size_missing_count = 0;
 							}
 
-							if(optic_flow_vel_est > 3)
+							if ((optic_flow_vel_est > 3) && (reverse_ctrl_step == 0))
 							{
-								if(reverse_ctrl_step == 0)
-								{
-									reverse_ctrl_count++;
-									DEBUG("[speed]------optic_flow_vel_est[%f]\n", optic_flow_vel_est);
-									old_pitch = snav_data->attitude_estimate.pitch;
-									old_roll  = -snav_data->attitude_estimate.roll;
-								}
+								reverse_ctrl_count++;
 
+								DEBUG("debug_flag control session 222 reverse_ctrl_count=%d.\n", reverse_ctrl_count);
+
+								DEBUG("optic-flow over_speed > 3------optic_flow_vel_est[%f], reverse_ctrl_count:%d \n", optic_flow_vel_est, reverse_ctrl_count);
+								old_pitch = snav_data->attitude_estimate.pitch;
+								old_roll  = -snav_data->attitude_estimate.roll;
 							}
 
 						}
 		      		}
 
-					// Safe spped limit an the end.
+					// Safe speed limit in the end.
 					if (fabs(old_cmd0) > fMaxCmdValue)
 					{
 						if (old_cmd0 > fMaxCmdValue)
@@ -1565,11 +1617,13 @@ int main(int argc, char* argv[])
 			}
 			// Sample-size error handle end
 
-			if (reverse_type_desire == 1)
+            // Diff between pos_est and pos_des is abnormal handle start
+			if (reverse_type_desire == 1 && mode == SN_OPTIC_FLOW_POS_HOLD_MODE)
 			{
-				// des diff with est is abnormal handle start
-				estimated_xy_sqrt = sqrt(snav_data->high_level_control_data.position_estimated[0]*snav_data->high_level_control_data.position_estimated[0] + snav_data->high_level_control_data.position_estimated[1]*snav_data->high_level_control_data.position_estimated[1]);
-				desired_xy_sqrt   = sqrt(snav_data->high_level_control_data.position_desired[0]* snav_data->high_level_control_data.position_desired[0] + snav_data->high_level_control_data.position_desired[1]*snav_data->high_level_control_data.position_desired[1]);
+				estimated_xy_sqrt = sqrt(snav_data->optic_flow_pos_vel.position_estimated[0]*snav_data->optic_flow_pos_vel.position_estimated[0]
+                                        + snav_data->optic_flow_pos_vel.position_estimated[1]*snav_data->optic_flow_pos_vel.position_estimated[1]);
+				desired_xy_sqrt   = sqrt(snav_data->optic_flow_pos_vel.position_desired[0]* snav_data->optic_flow_pos_vel.position_desired[0]
+                                        + snav_data->optic_flow_pos_vel.position_desired[1]*snav_data->optic_flow_pos_vel.position_desired[1]);
 
 				if(fabs(estimated_xy_sqrt)> 1
 					&& fabs(desired_xy_sqrt) > 1
@@ -1582,17 +1636,20 @@ int main(int argc, char* argv[])
 					if(reverse_ctrl_step == 0)
 					{
 						reverse_ctrl_count++;
-						DEBUG("[desired]--estimated_xy_sqrt[%f] desired_xy_sqrt[%f]--sample_size[%d]-air_heigh/2=[%f]---%d \n",estimated_xy_sqrt,desired_xy_sqrt,sample_size,revise_height/2,reverse_ctrl_count );
+
+						DEBUG("debug_flag control session 333 reverse_ctrl_count=%d.\n", reverse_ctrl_count);
+
+						DEBUG("Diff between pos_est and pos_des is abnormal---estimated_xy_sqrt[%f] desired_xy_sqrt[%f]--sample_size[%d]-revise_height/2=[%f], reverse_ctrl_count:%d.\n",
+                                estimated_xy_sqrt,desired_xy_sqrt,sample_size,revise_height/2,reverse_ctrl_count);
 						old_pitch = snav_data->attitude_estimate.pitch;
 						old_roll  = -snav_data->attitude_estimate.roll;
 					}
 				}
 			}
+			// Diff between pos_est and pos_des is abnormal handle end
 
-			// des diff with est is abnormal handle start
-
-			// lin_acc overlimit handle start
-			if (reverse_type_linacc == 1)
+			// Imu_lin_acc overlimit handle start
+			if (reverse_type_linacc == 1 && mode == SN_OPTIC_FLOW_POS_HOLD_MODE)
 			{
 				if (imu_status == SN_DATA_VALID)
 				{
@@ -1603,17 +1660,20 @@ int main(int argc, char* argv[])
 					{
 						linacc_sample_count++;
 						linacc_total_value += fabs(imu_lin_acc);
-
 					}
 					else
 					{
 						if((linacc_total_value/30)/1.44 > 2
-							&& ((revise_height> 0.3)
-								  && snav_data->general_status.on_ground == 0
-								  && reverse_ctrl_count == 0))
+							&& (revise_height> 0.3)
+							&& snav_data->general_status.on_ground == 0
+							&& reverse_ctrl_count == 0)
 						{
 							reverse_ctrl_count++;
-							DEBUG("[imu_lin_acc]--linacc_total_value/30[%f]\n", linacc_total_value/30);
+
+							DEBUG("debug_flag control session 444 reverse_ctrl_count=%d.\n", reverse_ctrl_count);
+
+							DEBUG("Imu_lin_acc overlimit--linacc_total_value/30[%f], reverse_ctrl_count:%d.\n",
+                                        linacc_total_value/30, reverse_ctrl_count);
 							old_pitch = snav_data->attitude_estimate.pitch;
 							old_roll  = -snav_data->attitude_estimate.roll;
 						}
@@ -1626,11 +1686,11 @@ int main(int argc, char* argv[])
 					imu_lin_acc = -108;
 				}
 			}
-			// lin_acc overlimit handle end
+			// Imu_lin_acc overlimit handle end
 			// Add end-----Judge whether need to reverse the drone end
 
 
-			// Prepare current drone status to send to Client
+			// Prepare current drone status for sending to client
 			drone_state = DroneState::NORMAL;							/*Reinit the drone status every cicle*/
 
 			memset(drone_state_error, 0, MAX_BUFF_LEN);
@@ -1667,7 +1727,7 @@ int main(int argc, char* argv[])
 
 			if (gps_enabled)											/*Get current gps/mag status*/
 			{
-				if (mag_status != SN_DATA_VALID)
+				if ((mag_status != SN_DATA_VALID) && (mag_status != SN_DATA_WARNING))
 				{
 					drone_state = DroneState::MAG_ERROR;
 					strcat(drone_state_error, ":5");
@@ -1692,7 +1752,7 @@ int main(int argc, char* argv[])
 				strcat(drone_state_error, ":8");
 			}
 
-			if (mode != SN_OPTIC_FLOW_POS_HOLD_MODE)					/*Get current mode*/
+			if ((mode != SN_OPTIC_FLOW_POS_HOLD_MODE) && (mode != SN_GPS_POS_HOLD_MODE))					/*Get current mode*/
 			{
 				if (mode == SN_EMERGENCY_LANDING_MODE)
 				{
@@ -1704,7 +1764,7 @@ int main(int argc, char* argv[])
 					drone_state = DroneState::EMERGENCY_KILL_MODE;
 					strcat(drone_state_error, ":10");
 				}
-				else
+				else if (mode != SN_GPS_POS_HOLD_MODE)
 				{
 					drone_state = DroneState::MODE_ERROR;
 					strcat(drone_state_error, ":11");
@@ -1713,7 +1773,8 @@ int main(int argc, char* argv[])
 			DEBUG("drone_state_error=%s\n", drone_state_error);
 
 			// Led light control
-			if ((mode != SN_OPTIC_FLOW_POS_HOLD_MODE)
+			if (((mode != SN_OPTIC_FLOW_POS_HOLD_MODE)
+                    && (mode != SN_GPS_POS_HOLD_MODE))
 				|| (drone_state == DroneState::IMU_ERROR)
 				|| (drone_state == DroneState::OPTIC_FLOW_ERROR)
 				|| (drone_state == DroneState::SONAR_ERROR)
@@ -1734,7 +1795,7 @@ int main(int argc, char* argv[])
 					|| (((/*z_est - z_est_startup*/revise_height) > 15.0f && (/*z_est - z_est_startup*/revise_height) <= 20.0f) && (voltage < 7.2f))
 					|| (((/*z_est - z_est_startup*/revise_height) > 20.0f) && (voltage < 7.3f)))
 #else
-			else if (voltage < 6.75f)
+			else if (voltage < low_battery)
 #endif
 			{
 				bNeedLedColorCtl = true;
@@ -1767,7 +1828,7 @@ int main(int argc, char* argv[])
 #ifdef	LOW_BATTERY_LANDING
 			// Low battery force landing
 			if ((props_state == SN_PROPS_STATE_SPINNING)
-				&& (voltage < 6.75f)
+				&& (voltage < low_battery)
 				&& (state == MissionState::LOITER
 					|| state == MissionState::TRAJECTORY_FOLLOW))
 			{
@@ -1790,9 +1851,12 @@ int main(int argc, char* argv[])
 			{
 				recv_udp_cmd = udp_buff_data;
 				udp_msg_array = split(recv_udp_cmd, STR_SEPARATOR);
-				DEBUG("udp control operation:%s\n", udp_buff_data);
 
-				if ((udp_msg_array.size() >= 6) && (udp_msg_array[0].compare(SNAV_CMD_CONROL) == 0))
+				if ((state == MissionState::LANDING) && (on_ground_flag == 1))
+				{
+					// Ignore the control msg when langding and the drone is on gounrd.
+				}
+				else if ((udp_msg_array.size() >= 6) && (udp_msg_array[0].compare(SNAV_CMD_CONROL) == 0))
 				{
 					// If any valid control msg have been received from the client
 					// Not the loiter msg or other task msg
@@ -1842,9 +1906,6 @@ int main(int argc, char* argv[])
 						float cmd2 = 0;
 						float cmd3 = 0;
 
-						// Use type to control how the commands get interpreted.
-			      		SnRcCommandType type = SN_RC_OPTIC_FLOW_POS_HOLD_CMD;
-
 						rolli	= atoi(udp_msg_array[1].c_str());
 						pitchi	= atoi(udp_msg_array[2].c_str());
 						yawi	= atoi(udp_msg_array[3].c_str());
@@ -1886,11 +1947,11 @@ int main(int argc, char* argv[])
 								}
 							}
 
+
 							DEBUG("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n");
 							DEBUG("UDP SNAV_SEND_CMD cmd0, cmd1, cmd2, cmd3: %f, %f, %f, %f\n", cmd0, cmd1, cmd2, cmd3);
 							DEBUG("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\n");
 
-							DEBUG("udp sn_send_rc_command with speed_coefficient=%f\n", speed_coefficient);
 #ifdef SPEED_LIMIT_FLAG
 							if (face_mission == true || body_mission == true)
 							{
@@ -1925,16 +1986,32 @@ int main(int argc, char* argv[])
 								else
 								{
 									// Slow down when height grow
-									cmd0 = cmd0*speed_coefficient*0.2f*(20.0/revise_height);
-									cmd1 = cmd1*speed_coefficient*0.2f*(20.0/revise_height);
+									cmd0 = cmd0*speed_coefficient*0.25f*(20.0/revise_height);
+									cmd1 = cmd1*speed_coefficient*0.25f*(20.0/revise_height);
 								}
 							}
 #endif
+							DEBUG("\n\ndebug_flag control sn_send_rc_command before###### cmd0,cmd1,cmd2,cmd3:%f,%f,%f,%f.\n"
+									, cmd0, cmd1, cmd2, cmd3);
+
+							DEBUG("debug_flag control sn_send_rc_command final reverse_ctrl_count=%d.\n", reverse_ctrl_count);
+
 							// Add by wlh---------reverse the drone start
-							if (reverse_full_flag == 1)
+							if (reverse_full_flag == 1 && mode == SN_OPTIC_FLOW_POS_HOLD_MODE)
 							{
+							    // Switch from optic-flow-mode  to  gps-pos-mode
+							    if (((last_mode == SN_OPTIC_FLOW_POS_HOLD_MODE) && (mode == SN_GPS_POS_HOLD_MODE))
+                                    || ((last_mode == SN_GPS_POS_HOLD_MODE) && (mode == SN_OPTIC_FLOW_POS_HOLD_MODE)))
+                                {
+                                    DEBUG("Reset reverse_ctrl_count to 0!, last_mode=%d, mode=%d\n", last_mode, mode);
+                                    reverse_ctrl_count = 0;
+                                }
+
+                                // Suddenly stop control from last cmd control or reverse_condition achieve
 								if ((fabs(cmd0) < 1e-4 && fabs(cmd1) < 1e-4 ) || reverse_ctrl_count != 0)
 								{
+									DEBUG("debug_flag control sn_send_rc_command reverse_ctrl_count=%d, cmd0=%f, cmd1=%f.\n", reverse_ctrl_count, cmd0, cmd1);
+
 									if ((old_cmd0 != 0 || old_cmd1 != 0)  && reverse_ctrl_count < stop_control_num)
 									{
 										if (reverse_ctrl_step == 0)
@@ -1948,31 +2025,34 @@ int main(int argc, char* argv[])
 											&& (fabs(old_cmd0)+0.05 > fabs(old_cmd00))
 											&& (fabs(old_cmd1)+0.05 > fabs(old_cmd11)))
 										{
-											int current_cmd_offset = cmd_offset;
+											int current_cmd_offset = reverse_plan_num;
 
 											if (reverse_ctrl_flag == 1)
 											{
 												if(reverse_ctrl_count == 0 && (revise_height> 0.3) && snav_data->general_status.on_ground == 0 )
 												{
 													reverse_ctrl_count++;
+
+													DEBUG("debug_flag control session 555 reverse_ctrl_count=%d.\n", reverse_ctrl_count);
 													old_pitch = snav_data->attitude_estimate.pitch;
 													old_roll  = -snav_data->attitude_estimate.roll;
-													DEBUG("[control break]------old_pitch[%f]old_roll[%f]optic_flow_vel_est[%f]\n",old_pitch,old_roll,optic_flow_vel_est);
+													DEBUG("[control break]------old_pitch[%f]old_roll[%f]optic_flow_vel_est[%f]\n",
+                                                            old_pitch,old_roll,optic_flow_vel_est);
 												}
 											}
 
 											if (((fabs(sqrt(old_pitch*old_pitch + old_roll*old_roll))/1.44) >= 0.2)
 												&& ((fabs(sqrt(old_pitch*old_pitch + old_roll*old_roll))/1.44) < 0.5))
 											{
-												current_cmd_offset = cmd_offset;
+												current_cmd_offset = reverse_plan_num;
 											}
 											else if((fabs(sqrt(old_pitch*old_pitch + old_roll*old_roll))/1.44) >= 0.5)
 											{
-												current_cmd_offset = cmd_offset/2;
+												current_cmd_offset = reverse_plan_num/2;
 											}
 											else
 											{
-												current_cmd_offset = cmd_offset*2;
+												current_cmd_offset = reverse_plan_num*2;
 											}
 
 											cmd0 = old_cmd00 - old_cmd0/current_cmd_offset;
@@ -1981,42 +2061,63 @@ int main(int argc, char* argv[])
 											cmd1 = old_cmd11 - old_cmd1/current_cmd_offset;
 											old_cmd11 = old_cmd11 - old_cmd1/current_cmd_offset;
 
-											DEBUG("gozero------optic_flow_vel_est[%f]cmd0[%f]cmd1[%f]old_cmd0[%f]old_cmd1[%f]pitch[%f]roll[%f]\n",optic_flow_vel_est,cmd0,cmd1,old_cmd0,old_cmd1,snav_data->attitude_estimate.pitch,-snav_data->attitude_estimate.roll);
+											DEBUG("reverse process------optic_flow_vel_est[%f]cmd0[%f]cmd1[%f]old_cmd0[%f]old_cmd1[%f]pitch[%f]roll[%f]\n",
+                                                    optic_flow_vel_est,cmd0,cmd1,old_cmd0,old_cmd1,snav_data->attitude_estimate.pitch,-snav_data->attitude_estimate.roll);
 
 											reverse_ctrl_step = 1;
 
-											if ((optic_flow_vel_est < 0.1) && (optic_flow_vel_est > 0.01))
-											{
-												reverse_ctrl_count = 0;
-												old_cmd0 = 0;
-												old_cmd1 = 0;
-												old_cmd00 = 0;
-												old_cmd11 = 0;
-												DEBUG("-------------gozero_end-1--- last_pitch[%f]old_pitch[%f]last_roll[%f]old_roll[%f]optic_flow_vel_est[%f]\n",last_pitch,old_pitch,last_roll,old_roll,optic_flow_vel_est);
-											}
-
+                                            if (mode == SN_GPS_POS_HOLD_MODE)
+                                            {
+                                                if ((gps_vel_est < 0.1) && (gps_vel_est > 0.01))
+    											{
+    												reverse_ctrl_count = 0;
+    												old_cmd0 = 0;
+    												old_cmd1 = 0;
+    												old_cmd00 = 0;
+    												old_cmd11 = 0;
+    												DEBUG("reverse end gps_mode--- last_pitch[%f]old_pitch[%f]last_roll[%f]old_roll[%f]gps_vel_est[%f]\n",
+                                                            last_pitch,old_pitch,last_roll,old_roll,gps_vel_est);
+    											}
+                                            }
+                                            else
+                                            {
+    											if ((optic_flow_vel_est < 0.1) && (optic_flow_vel_est > 0.01))
+    											{
+    												reverse_ctrl_count = 0;
+    												old_cmd0 = 0;
+    												old_cmd1 = 0;
+    												old_cmd00 = 0;
+    												old_cmd11 = 0;
+    												DEBUG("reverse end optic-flow_mode--- last_pitch[%f]old_pitch[%f]last_roll[%f]old_roll[%f]optic_flow_vel_est[%f]\n",
+                                                            last_pitch,old_pitch,last_roll,old_roll,optic_flow_vel_est);
+    											}
+                                            }
 										}
-										else if(fabs(old_cmd00+old_cmd0) <= 0.05 || fabs(old_cmd11+old_cmd1) <= 0.05)
+										else if (fabs(old_cmd00+old_cmd0) <= 0.05 || fabs(old_cmd11+old_cmd1) <= 0.05)
 										{
 											reverse_ctrl_step = 2;
 										}
-										if(reverse_ctrl_step == 2 && (fabs(old_cmd00) > 0.05 || fabs(old_cmd11) > 0.05) && fabs(old_cmd00)+fabs(old_cmd11) > 0.05 )
+
+										if (reverse_ctrl_step == 2
+                                            && (fabs(old_cmd00) > 0.05
+                                                || fabs(old_cmd11) > 0.05)
+                                            && fabs(old_cmd00) + fabs(old_cmd11) > 0.05)
 										{
 											int keep_cmd = 0;
-											int current_cmd_offset = cmd_offset;
+											int current_cmd_offset = reverse_plan_num;
 
 											if (((fabs(sqrt(old_pitch*old_pitch + old_roll*old_roll))/1.44) >= 0.2)
 												&& ((fabs(sqrt(old_pitch*old_pitch + old_roll*old_roll))/1.44) < 0.5))
 											{
-												current_cmd_offset = cmd_offset*2;
+												current_cmd_offset = reverse_plan_num*2;
 											}
 											else if((fabs(sqrt(old_pitch*old_pitch + old_roll*old_roll))/1.44) >= 0.5)
 											{
-												current_cmd_offset = cmd_offset*3;
+												current_cmd_offset = reverse_plan_num*3;
 											}
 											else
 											{
-												current_cmd_offset = cmd_offset;
+												current_cmd_offset = reverse_plan_num;
 											}
 
 
@@ -2039,7 +2140,7 @@ int main(int argc, char* argv[])
 												}
 											}
 
-											if(sample_size_missing_count > 3)
+											if (sample_size_missing_count > 3)
 											{
 												keep_cmd = 3;
 												reverse_ctrl_count = 1;
@@ -2049,7 +2150,7 @@ int main(int argc, char* argv[])
 
 											if(keep_cmd > 0)
 											{
-												//current_cmd_offset = cmd_offset*6;
+												//current_cmd_offset = reverse_plan_num*6;
 												cmd0 = old_cmd00;
 												cmd1 = old_cmd11;
 											}
@@ -2062,48 +2163,60 @@ int main(int argc, char* argv[])
 												old_cmd11 = old_cmd11 + old_cmd1/current_cmd_offset;
 											}
 
-
-
 											DEBUG("gozero------optic_flow_vel_est[%f]cmd0[%f]cmd1[%f]cmd2[%f]cmd3[%f]---reverse_ctrl_count[%d]---old_cmd0-1[%f][%f]---estimated-desired[%f]---imu_lin_acc[%f]---sample_size_missing_count[%d]---pitch[%f]roll[%f]---current_cmd_offset[%d]---keep_cmd[%d]\n",optic_flow_vel_est,cmd0,cmd1,cmd2,cmd3,reverse_ctrl_count,old_cmd0,old_cmd1,fabs(estimated_xy_sqrt - desired_xy_sqrt),fabs(imu_lin_acc),sample_size_missing_count,snav_data->attitude_estimate.pitch,-snav_data->attitude_estimate.roll,current_cmd_offset,keep_cmd);
 
-											//if((fabs(last_pitch + old_pitch) < 0.05 && (fabs(last_roll + old_roll) < 0.05)
-											if ((optic_flow_vel_est < 0.1) && (optic_flow_vel_est > 0.05))
-											{
-												// Reverse finished
-												reverse_ctrl_count = 0;
-												old_cmd0 = 0;
-												old_cmd1 = 0;
-												old_cmd00 = 0;
-												old_cmd11 = 0;
-												DEBUG("-------------gozero-2_end---last_pitch[%f]old_pitch[%f]last_roll[%f]old_roll[%f]optic_flow_vel_est[%f]\n",last_pitch,old_pitch,last_roll,old_roll,optic_flow_vel_est);
-											}
+                                            // Reverse reverse_ctrl_count
+                                            if (mode == SN_GPS_POS_HOLD_MODE)
+                                            {
+                                                if ((gps_vel_est < 0.1) && (gps_vel_est > 0.05))
+    											{
+    												reverse_ctrl_count = 0;
+    												old_cmd0 = 0;
+    												old_cmd1 = 0;
+    												old_cmd00 = 0;
+    												old_cmd11 = 0;
+    												DEBUG("gozero-2_end gps-mode---last_pitch[%f]old_pitch[%f]last_roll[%f]old_roll[%f]gps_vel_est[%f]\n",last_pitch,old_pitch,last_roll,old_roll,gps_vel_est);
+    											}
+                                            }
+                                            else
+                                            {
+                                                //if((fabs(last_pitch + old_pitch) < 0.05 && (fabs(last_roll + old_roll) < 0.05)
+    											if ((optic_flow_vel_est < 0.1) && (optic_flow_vel_est > 0.05))
+    											{
+    												reverse_ctrl_count = 0;
+    												old_cmd0 = 0;
+    												old_cmd1 = 0;
+    												old_cmd00 = 0;
+    												old_cmd11 = 0;
+    												DEBUG("gozero-2_end optic-flow_mode---last_pitch[%f]old_pitch[%f]last_roll[%f]old_roll[%f]optic_flow_vel_est[%f]\n",last_pitch,old_pitch,last_roll,old_roll,optic_flow_vel_est);
+    											}
+                                            }
 
-											if(fabs(old_cmd00) <= fabs(old_cmd0/current_cmd_offset) &&	fabs(old_cmd11) <= fabs(old_cmd1/current_cmd_offset))
-												DEBUG("gozero-------------------------------------------------------------end\n");
+											if (fabs(old_cmd00) <= fabs(old_cmd0/current_cmd_offset)
+                                                &&  fabs(old_cmd11) <= fabs(old_cmd1/current_cmd_offset))
+											{
+											    DEBUG("gozero-------------------------------------------------------------end\n");
+                                            }
 
 											last_pitch = snav_data->attitude_estimate.pitch;
 											last_roll = -snav_data->attitude_estimate.roll;
 
 											reverse_ctrl_step = 2;
-
 										}
-										else if(reverse_ctrl_step > 1 && reverse_ctrl_count > 0)
+										else if (reverse_ctrl_step > 1 && reverse_ctrl_count > 0)
 										{
 											cmd0 = old_cmd00;
 											cmd1 = old_cmd11;
 											reverse_ctrl_count = 0;
 										}
-
 									}
 								}
 								else
 								{
 									if (reverse_ctrl_count == 0)
 									{
-										old_cmd0 = cmd0;
-										old_cmd1 = cmd1;
-
-
+										old_cmd0 = last_cmd0;   //cmd0;
+										old_cmd1 = last_cmd1;   //cmd1;
 										old_cmd00 = old_cmd0;
 										old_cmd11 = old_cmd1;
 										reverse_ctrl_step = 0;
@@ -2114,6 +2227,7 @@ int main(int argc, char* argv[])
 								if (reverse_ctrl_count > 0)
 								{
 									reverse_ctrl_count++;
+									DEBUG("debug_flag control session 666 reverse_ctrl_count=%d.\n", reverse_ctrl_count);
 								}
 
 								if (reverse_ctrl_count > stop_control_num)
@@ -2136,6 +2250,8 @@ int main(int argc, char* argv[])
 								length=sendto(server_udp_sockfd,result_to_client,strlen(result_to_client),0,(struct sockaddr *)&remote_addr,sizeof(struct sockaddr));
 							}
 #endif
+                            DEBUG("before Enter control recal cmd on_ground,reverse_ctrl_count, sonar, cmd0, cmd1: %d, %d, %f, %f, %f.\n",
+                                    snav_data->general_status.on_ground, reverse_ctrl_count, snav_data->sonar_0_raw.range, cmd0, cmd1);
 							// Add by wlh-----------limit the speed to make the drone fly smoothly start
 							if (snav_data->general_status.on_ground == 0
 								&& snav_data->sonar_0_raw.range > 0.30
@@ -2154,39 +2270,54 @@ int main(int argc, char* argv[])
 								{
 									now_mag_vel_des = sqrt(snav_data->gps_pos_vel.velocity_estimated[0]*snav_data->gps_pos_vel.velocity_estimated[0]
 															+ snav_data->gps_pos_vel.velocity_estimated[1]*snav_data->gps_pos_vel.velocity_estimated[1]);
+
+                                    if (now_mag_vel_des > 2*gohome_vel_des_limit)
+    								{
+    									DEBUG("control recal before session 1 gps-mode cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
+
+    									pp_cmd0 = cmd0*fabs(2*gohome_vel_des_limit/now_mag_vel_des);
+    									pp_cmd1 = cmd1*fabs(2*gohome_vel_des_limit/now_mag_vel_des);
+
+    									cmd0 = pp_cmd0;
+    									cmd1 = pp_cmd1;
+
+										DEBUG("debug_flag control sn_send_rc_command session 111");
+
+    									DEBUG("control recal after session 1 gps-mode cmd0,cmd1:%f,%f.\n", cmd0, cmd1);;
+    								}
 								}
 								else
 								{
 									now_mag_vel_des = sqrt(snav_data->optic_flow_pos_vel.velocity_estimated[0]*snav_data->optic_flow_pos_vel.velocity_estimated[0]
 															+ snav_data->optic_flow_pos_vel.velocity_estimated[1]*snav_data->optic_flow_pos_vel.velocity_estimated[1]);
-								}
 
-								if (now_mag_vel_des > gohome_vel_des_limit)
-								{
-									DEBUG("control recal before session 1 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
+                                    if (now_mag_vel_des > gohome_vel_des_limit)
+    								{
+    									DEBUG("control recal before session 1 optic-flow-mode cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
 
-									pp_cmd0 = cmd0*fabs(gohome_vel_des_limit/now_mag_vel_des);
-									pp_cmd1 = cmd1*fabs(gohome_vel_des_limit/now_mag_vel_des);
+    									pp_cmd0 = cmd0*fabs(gohome_vel_des_limit/now_mag_vel_des);
+    									pp_cmd1 = cmd1*fabs(gohome_vel_des_limit/now_mag_vel_des);
 
-									cmd0 = pp_cmd0;
-									cmd1 = pp_cmd1;
+    									cmd0 = pp_cmd0;
+    									cmd1 = pp_cmd1;
 
-									DEBUG("control recal after session 1 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);;
-								}
+    									DEBUG("control recal after session 1 optic-flow-mode cmd0,cmd1:%f,%f.\n", cmd0, cmd1);;
+    								}
 
-								float go_mag_pitch_roll_limit = sqrt(snav_data->attitude_estimate.pitch*snav_data->attitude_estimate.pitch
+                                    float go_mag_pitch_roll_limit = sqrt(snav_data->attitude_estimate.pitch*snav_data->attitude_estimate.pitch
 																	+ snav_data->attitude_estimate.roll*snav_data->attitude_estimate.roll);
-								if (go_mag_pitch_roll_limit > go_pitch_roll_limit)
-								{
-									DEBUG("control recal before session 2 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
+    								if (go_mag_pitch_roll_limit > go_pitch_roll_limit)
+    								{
+    									DEBUG("control recal before session 2 optic-flow-mode cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
 
-									pp_cmd0 = cmd0*fabs(go_pitch_roll_limit/go_mag_pitch_roll_limit);
-									pp_cmd1 = cmd1*fabs(go_pitch_roll_limit/go_mag_pitch_roll_limit);
+    									pp_cmd0 = cmd0*fabs(go_pitch_roll_limit/go_mag_pitch_roll_limit);
+    									pp_cmd1 = cmd1*fabs(go_pitch_roll_limit/go_mag_pitch_roll_limit);
 
-									cmd0 = pp_cmd0;
-									cmd1 = pp_cmd1;
+    									cmd0 = pp_cmd0;
+    									cmd1 = pp_cmd1;
 
-									DEBUG("control recal after session 2 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
+    									DEBUG("control recal after session 2 optic-flow-mode cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
+    								}
 								}
 
 								// cmd limit
@@ -2201,11 +2332,18 @@ int main(int argc, char* argv[])
 									cmd0 = cmd0*(speed_level/cmd_mag);
 									cmd1 = cmd0*(speed_level/cmd_mag);
 
+									DEBUG("debug_flag control sn_send_rc_command session 222");
+
 									DEBUG("control recal after session 3 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
 								}
 
 								// last cmd limit
 								float last_cmd_mag = sqrt(last_cmd0*last_cmd0 + last_cmd1*last_cmd1);
+
+                                DEBUG("control recal after session 4 cmd_mag,last_cmd_mag:%f,%f.\n", cmd_mag, last_cmd_mag);
+                                DEBUG("control recal after session 4 cmd0,last_cmd0:%f,%f.\n", cmd0, last_cmd0);
+                                DEBUG("control recal after session 4 cmd1,last_cmd1:%f,%f.\n", cmd1, last_cmd1);
+
 								if (fabs(cmd_mag - last_cmd_mag) > go_cmd_offset_limit
 									|| fabs(cmd0 - last_cmd0) > go_cmd_offset_limit
 									|| fabs(cmd1 - last_cmd1) > go_cmd_offset_limit)
@@ -2227,8 +2365,13 @@ int main(int argc, char* argv[])
 
 									float p_bate =  go_cmd_offset_limit/p_bate_offset;
 
+                                    DEBUG("control recal after session 4 p_bate:%f.\n", p_bate);
+
+
 									cmd0 = last_cmd0+(cmd0 - last_cmd0)*p_bate;
 									cmd1 = last_cmd1+(cmd1 - last_cmd1)*p_bate;
+
+									DEBUG("debug_flag control sn_send_rc_command session 333");
 
 									DEBUG("control recal after session 4 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
 								}
@@ -2241,6 +2384,8 @@ int main(int argc, char* argv[])
 
 									cmd0 = cmd0*(speed_level/cmd_mag);
 									cmd1 = cmd0*(speed_level/cmd_mag);
+
+									DEBUG("debug_flag control sn_send_rc_command session 444");
 
 									DEBUG("control recal after session 5 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
 								}
@@ -2276,7 +2421,7 @@ int main(int argc, char* argv[])
 								}
 							}
 
-							cmd3 = cmd3*0.15f;
+							cmd3 = cmd3*0.3f;      //0.15f
 
 							DEBUG("[Current UDP sample_size]: [%d]\n", sample_size);
 
@@ -2285,7 +2430,24 @@ int main(int argc, char* argv[])
 							DEBUG("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\n");
 
 							// Send the commands to Snapdragon Navigator with default RC options
-			        		sn_send_rc_command(type, RC_OPT_DEFAULT_RC, cmd0, cmd1, cmd2, cmd3);
+							if ((/*z_est - z_est_startup*/revise_height >= gps_mode_height)
+                                && gps_enabled
+                                && (gps_status == SN_DATA_VALID)
+                                && ((t_now_for_gps - t_gps_invalid) > 1))
+							{
+								DEBUG("sn_send_rc_command 111 SN_RC_GPS_POS_HOLD_CMD\n");
+								sn_send_rc_command(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_DEFAULT_RC, cmd0, cmd1, cmd2, cmd3);
+							}
+							else
+							{
+								DEBUG("sn_send_rc_command 111 SN_RC_OPTIC_FLOW_POS_HOLD_CMD\n");
+								sn_send_rc_command(SN_RC_OPTIC_FLOW_POS_HOLD_CMD, RC_OPT_DEFAULT_RC, cmd0, cmd1, cmd2, cmd3);
+							}
+
+							DEBUG("debug_flag control sn_send_rc_command final****** cmd0,cmd1,cmd2,cmd3:%f,%f,%f,%f.\n"
+									, cmd0, cmd1, cmd2, cmd3);
+
+                            last_mode = (SnMode)snav_data->general_status.current_mode;
 
 							// Add by wlh
 							last_cmd0 = cmd0;
@@ -2545,6 +2707,45 @@ int main(int argc, char* argv[])
 										(struct sockaddr*)&remote_addr, sizeof(struct sockaddr));
 					DEBUG("SNAV_TASK_GET_STORAGE_RETURN result_to_client=%s, length=%d\n", result_to_client, length);
 				}
+                else if ((udp_msg_array.size() >= 1) && (udp_msg_array[0].compare(SNAV_TASK_GET_SD_STORAGE) == 0))
+				{
+					char get_sd_storage_total[128] = "df -h | grep -w '/mnt/sdcard' | head -n 1 | awk '{print $2}'";
+					char get_sd_storage_free[128] = "df -h | grep -w '/mnt/sdcard' | head -n 1 | awk '{print $4}'";
+					char sd_storage_total[128];
+					char sd_storage_free[128];
+
+					memset(sd_storage_total, 0, 128);
+					memset(sd_storage_free, 0, 128);
+
+				  	FILE *fp_total = popen(get_sd_storage_total, "r");
+			        fgets(sd_storage_total, sizeof(sd_storage_total), fp_total);
+			        pclose(fp_total);
+
+					FILE *fp_free = popen(get_sd_storage_free, "r");
+			        fgets(sd_storage_free, sizeof(sd_storage_free), fp_free);
+			        pclose(fp_free);
+
+					if (sd_storage_total[strlen(sd_storage_total)-1] == '\n')
+					{
+						sd_storage_total[strlen(sd_storage_total)-1] = '\0';
+					}
+
+					if (sd_storage_free[strlen(sd_storage_free)-1] == '\n')
+					{
+						sd_storage_free[strlen(sd_storage_free)-1] = '\0';
+					}
+
+					memset(result_to_client, 0, MAX_BUFF_LEN);
+					sprintf(result_to_client, "%s", SNAV_TASK_GET_SD_STORAGE_RETURN);
+					strcat(result_to_client, STR_SEPARATOR);
+					strcat(result_to_client, sd_storage_total);
+					strcat(result_to_client, STR_SEPARATOR);
+					strcat(result_to_client, sd_storage_free);
+
+					length = sendto(server_udp_sockfd, result_to_client, strlen(result_to_client), 0,
+										(struct sockaddr*)&remote_addr, sizeof(struct sockaddr));
+					DEBUG("SNAV_TASK_GET_SD_STORAGE_RETURN result_to_client=%s, length=%d\n", result_to_client, length);
+				}
 				else if ((udp_msg_array.size() >= 1) && (udp_msg_array[0].compare(SNAV_TASK_GET_SD_STATUS) == 0))
 				{
 					memset(result_to_client, 0, MAX_BUFF_LEN);
@@ -2687,7 +2888,7 @@ int main(int argc, char* argv[])
 					DEBUG("SNAV_CMD_RETURN_CIRCLE result_to_client=%s, length=%d\n", result_to_client, length);
 
 #ifdef CIRCLE_HEIGHT_LIMIT_FLAG
-					if ((/*z_est - z_est_startup*/revise_height) > 5.0)
+					if ((/*z_est - z_est_startup*/revise_height) > 4)	//5.0)
 					{
 						continue;
 					}
@@ -2899,6 +3100,11 @@ int main(int argc, char* argv[])
 					DEBUG("udp receive  height_limit=%f\n",height_limit);
 				}
 #endif
+				else if ((udp_msg_array.size() >= 2) && (udp_msg_array[0].compare("gps_mode_height") == 0))
+				{
+					gps_mode_height = atof(udp_msg_array[1].c_str());
+					DEBUG("udp receive  gps_mode_height=%f\n",gps_mode_height);
+				}
 			}
 			// Handle the udp msg end
 
@@ -3704,7 +3910,6 @@ int main(int argc, char* argv[])
 							&& !face_mission
 							&& !body_mission)
 					{
-						curSendMode = SN_RC_OPTIC_FLOW_POS_HOLD_CMD;
 						panorama_mission = true;
 						calcPanoramaPoint = true;
 
@@ -3727,7 +3932,6 @@ int main(int argc, char* argv[])
 							&& !face_mission
 							&& !body_mission)
 					{
-						curSendMode = SN_RC_OPTIC_FLOW_POS_HOLD_CMD;
 						fly_test_mission = true;
 						fly_test_count = 0;
 						DEBUG("SNAV_CMD_FLY_TEST\n");
@@ -3743,7 +3947,6 @@ int main(int argc, char* argv[])
 							&& !face_mission
 							&& !body_mission)
 					{
-						curSendMode = SN_RC_OPTIC_FLOW_POS_HOLD_CMD;
 						rotation_test_mission = true;
 						rotation_test_count = 0;
 						DEBUG("SNAV_CMD_ROTATION_TEST\n");
@@ -3759,7 +3962,6 @@ int main(int argc, char* argv[])
 							&& !face_mission
 							&& !body_mission)
 					{
-						curSendMode = SN_RC_OPTIC_FLOW_POS_HOLD_CMD;
 						circle_mission = true;
 						calcCirclePoint = true;
 
@@ -3816,18 +4018,16 @@ int main(int argc, char* argv[])
 							// Use optic-flow return instead
 							else
 							{
-								curSendMode = SN_RC_OPTIC_FLOW_POS_HOLD_CMD;
 								return_mission = true;
-								state = MissionState::TRAJECTORY_FOLLOW;
 								entering_loiter = true;
+								state = MissionState::TRAJECTORY_FOLLOW;
 							}
 						}
 						else
 						{
-							curSendMode = SN_RC_OPTIC_FLOW_POS_HOLD_CMD;
 							return_mission = true;
-							state = MissionState::TRAJECTORY_FOLLOW;
 							entering_loiter = true;
+							state = MissionState::TRAJECTORY_FOLLOW;
 						}
 
 						// Every circle recalc the distance and yaw_diff from home for Return mission
@@ -4939,35 +5139,63 @@ int main(int argc, char* argv[])
 			// Go from the commands in real units computed above to the
 			// dimensionless commands that the interface is expecting using a
 			// linear mapping
-			//sn_apply_cmd_mapping(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING,
-			//sn_apply_cmd_mapping(SN_RC_OPTIC_FLOW_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING,//curSendMode
-
 			if (return_mission)
 			{
 				DEBUG("[sn_apply_cmd_mapping gohome_x_vel_des_yawed, gohome_y_vel_des_yawed, gohome_z_vel_des, gohome_yaw_vel_des]: [%f,%f,%f,%f]\n",
 	  										 gohome_x_vel_des_yawed, gohome_y_vel_des_yawed, gohome_z_vel_des, gohome_yaw_vel_des);
-				sn_apply_cmd_mapping(curSendMode, RC_OPT_LINEAR_MAPPING,
+
+				/*
+				if ((((z_est - z_est_startup) >= gps_mode_height) || (revise_height >= gps_mode_height))
+						&& gps_enabled && (gps_status == SN_DATA_VALID))
+				*/
+				if ((revise_height >= gps_mode_height)
+                    && gps_enabled
+                    && (gps_status == SN_DATA_VALID)
+                    && ((t_now_for_gps - t_gps_invalid) > 1))
+				{
+					sn_apply_cmd_mapping(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING,
 									 gohome_x_vel_des_yawed, gohome_y_vel_des_yawed,
  									 gohome_z_vel_des, gohome_yaw_vel_des,
  									 &cmd0, &cmd1, &cmd2, &cmd3);
+				}
+				else
+				{
+					sn_apply_cmd_mapping(SN_RC_OPTIC_FLOW_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING,
+									 gohome_x_vel_des_yawed, gohome_y_vel_des_yawed,
+ 									 gohome_z_vel_des, gohome_yaw_vel_des,
+ 									 &cmd0, &cmd1, &cmd2, &cmd3);
+				}
 			}
 			else
 			{
 				DEBUG("[sn_apply_cmd_mapping x_vel_des_yawed, y_vel_des_yawed, z_vel_des, yaw_vel_des]: [%f,%f,%f,%f]\n",
 		  									 x_vel_des_yawed, y_vel_des_yawed, z_vel_des, yaw_vel_des);
-				sn_apply_cmd_mapping(curSendMode, RC_OPT_LINEAR_MAPPING,
+				/*
+				if ((((z_est - z_est_startup) >= gps_mode_height) || (revise_height >= gps_mode_height))
+						&& gps_enabled && (gps_status == SN_DATA_VALID))
+				*/
+				if ((revise_height >= gps_mode_height)
+                    && gps_enabled
+                    && (gps_status == SN_DATA_VALID)
+                    && ((t_now_for_gps - t_gps_invalid) > 1))
+				{
+					sn_apply_cmd_mapping(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING,
 									 x_vel_des_yawed, y_vel_des_yawed,
 									 z_vel_des, yaw_vel_des,
 									 &cmd0, &cmd1, &cmd2, &cmd3);
+				}
+				else
+				{
+					sn_apply_cmd_mapping(SN_RC_OPTIC_FLOW_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING,
+									 x_vel_des_yawed, y_vel_des_yawed,
+									 z_vel_des, yaw_vel_des,
+									 &cmd0, &cmd1, &cmd2, &cmd3);
+				}
 			}
-
-			// Send the commands if in the right mode.
-			//sn_send_rc_command(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING,
-			//sn_send_rc_command(SN_RC_OPTIC_FLOW_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING,
 
 			if (body_follow_switch && body_follow_prallel && cmd1 != 0)
 			{
-				cmd0 =0; 		//Cuiyc add for people follow
+				cmd0 = 0; 		//Cuiyc add for people follow
 			}
 
 			if (face_follow_switch && (cmd0 != 0 || cmd1 != 0))
@@ -5016,15 +5244,15 @@ int main(int argc, char* argv[])
 				}
 				else
 				{
-					cmd0 = cmd0*speed_coefficient*0.2f*(20.0/revise_height);
-					cmd1 = cmd1*speed_coefficient*0.2f*(20.0/revise_height);
+					cmd0 = cmd0*speed_coefficient*0.25f*(20.0/revise_height);
+					cmd1 = cmd1*speed_coefficient*0.25f*(20.0/revise_height);
 				}
 			}
 #endif
 
 #ifdef HEIGHT_LIMIT
 			//limit the height
-			if (((z_est - z_est_startup)>=height_limit) && (cmd2 > 0))
+			if (((z_est - z_est_startup)>= height_limit) && (cmd2 > 0))
 			{
 				cmd2 = 0;
 
@@ -5036,8 +5264,16 @@ int main(int argc, char* argv[])
 			}
 #endif
 			// Add by wlh
-			if (reverse_full_flag == 1)
+			if (reverse_full_flag == 1 && mode == SN_OPTIC_FLOW_POS_HOLD_MODE)
 			{
+			    // Switch from optic-flow-mode  to  gps-pos-mode
+			    if (((last_mode == SN_OPTIC_FLOW_POS_HOLD_MODE) && (mode == SN_GPS_POS_HOLD_MODE))
+                    || ((last_mode == SN_GPS_POS_HOLD_MODE) && (mode == SN_OPTIC_FLOW_POS_HOLD_MODE)))
+                {
+                    DEBUG("set reverse_ctrl_count to 0!, last_mode=%d, mode=%d\n", last_mode, mode);
+                    reverse_ctrl_count = 0;
+                }
+
 				if ((fabs(cmd0) < 1e-4 && fabs(cmd1) < 1e-4 ) || reverse_ctrl_count != 0)
 				{
 					if ((old_cmd0 != 0 || old_cmd1 != 0)  && reverse_ctrl_count < stop_control_num)
@@ -5053,13 +5289,15 @@ int main(int argc, char* argv[])
 							&& (fabs(old_cmd0)+0.05 > fabs(old_cmd00))
 							&& (fabs(old_cmd1)+0.05 > fabs(old_cmd11)))
 						{
-							int current_cmd_offset = cmd_offset;
+							int current_cmd_offset = reverse_plan_num;
 
 							if (reverse_ctrl_flag == 1)
 							{
 								if(reverse_ctrl_count == 0 && (revise_height> 0.3) && snav_data->general_status.on_ground == 0 )
 								{
 									reverse_ctrl_count++;
+
+									DEBUG("debug_flag formal session aaa reverse_ctrl_count=%d.\n", reverse_ctrl_count);
 									old_pitch = snav_data->attitude_estimate.pitch;
 									old_roll  = -snav_data->attitude_estimate.roll;
 									DEBUG("*******************************[control break]------old_pitch[%f]old_roll[%f]optic_flow_vel_est[%f]\n",old_pitch,old_roll,optic_flow_vel_est);
@@ -5069,15 +5307,15 @@ int main(int argc, char* argv[])
 							if (((fabs(sqrt(old_pitch*old_pitch + old_roll*old_roll))/1.44) >= 0.2)
 								&& ((fabs(sqrt(old_pitch*old_pitch + old_roll*old_roll))/1.44) < 0.5))
 							{
-								current_cmd_offset = cmd_offset;
+								current_cmd_offset = reverse_plan_num;
 							}
 							else if((fabs(sqrt(old_pitch*old_pitch + old_roll*old_roll))/1.44) >= 0.5)
 							{
-								current_cmd_offset = cmd_offset/2;
+								current_cmd_offset = reverse_plan_num/2;
 							}
 							else
 							{
-								current_cmd_offset = cmd_offset*2;
+								current_cmd_offset = reverse_plan_num*2;
 							}
 
 							cmd0 = old_cmd00 - old_cmd0/current_cmd_offset;
@@ -5090,16 +5328,30 @@ int main(int argc, char* argv[])
 
 							reverse_ctrl_step = 1;
 
-							if ((optic_flow_vel_est < 0.1) && (optic_flow_vel_est > 0.01))
-							{
-								reverse_ctrl_count = 0;
-								old_cmd0 = 0;
-								old_cmd1 = 0;
-								old_cmd00 = 0;
-								old_cmd11 = 0;
-								DEBUG("-------------gozero_end-1--- last_pitch[%f]old_pitch[%f]last_roll[%f]old_roll[%f]optic_flow_vel_est[%f]\n",last_pitch,old_pitch,last_roll,old_roll,optic_flow_vel_est);
-							}
-
+                            if (mode == SN_GPS_POS_HOLD_MODE)
+                            {
+                                if ((gps_vel_est < 0.1) && (gps_vel_est > 0.01))
+    							{
+    								reverse_ctrl_count = 0;
+    								old_cmd0 = 0;
+    								old_cmd1 = 0;
+    								old_cmd00 = 0;
+    								old_cmd11 = 0;
+    								DEBUG("-------------gozero_end-1--- last_pitch[%f]old_pitch[%f]last_roll[%f]old_roll[%f]gps_vel_est[%f]\n",last_pitch,old_pitch,last_roll,old_roll,gps_vel_est);
+    							}
+                            }
+                            else
+                            {
+                                if ((optic_flow_vel_est < 0.1) && (optic_flow_vel_est > 0.01))
+    							{
+    								reverse_ctrl_count = 0;
+    								old_cmd0 = 0;
+    								old_cmd1 = 0;
+    								old_cmd00 = 0;
+    								old_cmd11 = 0;
+    								DEBUG("-------------gozero_end-1--- last_pitch[%f]old_pitch[%f]last_roll[%f]old_roll[%f]optic_flow_vel_est[%f]\n",last_pitch,old_pitch,last_roll,old_roll,optic_flow_vel_est);
+    							}
+                            }
 						}
 						else if(fabs(old_cmd00+old_cmd0) <= 0.05 || fabs(old_cmd11+old_cmd1) <= 0.05)
 						  reverse_ctrl_step = 2;
@@ -5107,20 +5359,20 @@ int main(int argc, char* argv[])
 						if(reverse_ctrl_step == 2 && (fabs(old_cmd00) > 0.05 || fabs(old_cmd11) > 0.05) && fabs(old_cmd00)+fabs(old_cmd11) > 0.05 )
 						{
 							int keep_cmd = 0;
-							int current_cmd_offset = cmd_offset;
+							int current_cmd_offset = reverse_plan_num;
 
 							if (((fabs(sqrt(old_pitch*old_pitch + old_roll*old_roll))/1.44) >= 0.2)
 								&& ((fabs(sqrt(old_pitch*old_pitch + old_roll*old_roll))/1.44) < 0.5))
 							{
-								current_cmd_offset = cmd_offset*2;
+								current_cmd_offset = reverse_plan_num*2;
 							}
 							else if((fabs(sqrt(old_pitch*old_pitch + old_roll*old_roll))/1.44) >= 0.5)
 							{
-								current_cmd_offset = cmd_offset*3;
+								current_cmd_offset = reverse_plan_num*3;
 							}
 							else
 							{
-								current_cmd_offset = cmd_offset;
+								current_cmd_offset = reverse_plan_num;
 							}
 
 
@@ -5153,7 +5405,7 @@ int main(int argc, char* argv[])
 
 							if(keep_cmd > 0)
 							{
-								//current_cmd_offset = cmd_offset*6;
+								//current_cmd_offset = reverse_plan_num*6;
 								cmd0 = old_cmd00;
 								cmd1 = old_cmd11;
 							}
@@ -5170,16 +5422,32 @@ int main(int argc, char* argv[])
 
 							DEBUG("gozero------optic_flow_vel_est[%f]cmd0[%f]cmd1[%f]cmd2[%f]cmd3[%f]---reverse_ctrl_count[%d]---old_cmd0-1[%f][%f]---estimated-desired[%f]---imu_lin_acc[%f]---sample_size_missing_count[%d]---pitch[%f]roll[%f]---current_cmd_offset[%d]---keep_cmd[%d]\n",optic_flow_vel_est,cmd0,cmd1,cmd2,cmd3,reverse_ctrl_count,old_cmd0,old_cmd1,fabs(estimated_xy_sqrt - desired_xy_sqrt),fabs(imu_lin_acc),sample_size_missing_count,snav_data->attitude_estimate.pitch,-snav_data->attitude_estimate.roll,current_cmd_offset,keep_cmd);
 
-							//if((fabs(last_pitch + old_pitch) < 0.05 && (fabs(last_roll + old_roll) < 0.05)
-							if ((optic_flow_vel_est < 0.1) && (optic_flow_vel_est > 0.05))
-							{
-								reverse_ctrl_count = 0;//反拉结束
-								old_cmd0 = 0;
-								old_cmd1 = 0;
-								old_cmd00 = 0;
-								old_cmd11 = 0;
-								DEBUG("-------------gozero-2_end---last_pitch[%f]old_pitch[%f]last_roll[%f]old_roll[%f]optic_flow_vel_est[%f]\n",last_pitch,old_pitch,last_roll,old_roll,optic_flow_vel_est);
-							}
+
+                            if (mode == SN_GPS_POS_HOLD_MODE)
+                            {
+                                if ((gps_vel_est < 0.1) && (gps_vel_est > 0.05))
+                                {
+                                    reverse_ctrl_count = 0;
+                                    old_cmd0 = 0;
+                                    old_cmd1 = 0;
+                                    old_cmd00 = 0;
+                                    old_cmd11 = 0;
+                                    DEBUG("-------------gozero-2_end---last_pitch[%f]old_pitch[%f]last_roll[%f]old_roll[%f]gps_vel_est[%f]\n",last_pitch,old_pitch,last_roll,old_roll,gps_vel_est);
+                                }
+                            }
+                            else
+                            {
+                                //if((fabs(last_pitch + old_pitch) < 0.05 && (fabs(last_roll + old_roll) < 0.05)
+    							if ((optic_flow_vel_est < 0.1) && (optic_flow_vel_est > 0.05))
+    							{
+    								reverse_ctrl_count = 0;//反拉结束
+    								old_cmd0 = 0;
+    								old_cmd1 = 0;
+    								old_cmd00 = 0;
+    								old_cmd11 = 0;
+    								DEBUG("-------------gozero-2_end---last_pitch[%f]old_pitch[%f]last_roll[%f]old_roll[%f]optic_flow_vel_est[%f]\n",last_pitch,old_pitch,last_roll,old_roll,optic_flow_vel_est);
+    							}
+                            }
 
 							if(fabs(old_cmd00) <= fabs(old_cmd0/current_cmd_offset) &&	fabs(old_cmd11) <= fabs(old_cmd1/current_cmd_offset))
 								DEBUG("gozero-------------------------------------------------------------end\n");
@@ -5216,6 +5484,7 @@ int main(int argc, char* argv[])
 				if (reverse_ctrl_count > 0)
 				{
 					reverse_ctrl_count++;
+					DEBUG("debug_flag formal session bbb reverse_ctrl_count=%d.\n", reverse_ctrl_count);
 				}
 
 				if (reverse_ctrl_count > stop_control_num)
@@ -5233,7 +5502,7 @@ int main(int argc, char* argv[])
 					{
 						if ((revise_height) > 5)
 						{
-							cmd0 = 0.15*speed_coefficient*0.2f*(20.0/revise_height);
+							cmd0 = 0.3*speed_coefficient*0.25f*(20.0/revise_height);
 
 							if (fabs((float)snav_data->gps_pos_vel.velocity_estimated[0]) > 1.5)
 							{
@@ -5323,6 +5592,13 @@ int main(int argc, char* argv[])
 			}
 
 			// Add by wlh
+
+            DEBUG("before Enter formal recal cmd on_ground,reverse_ctrl_count, sonar, cmd0, cmd1: %d, %d, %f, %f, %f.\n",
+                    snav_data->general_status.on_ground, reverse_ctrl_count, snav_data->sonar_0_raw.range, cmd0, cmd1);
+
+			DEBUG("\n\ndebug_flag formal sn_send_rc_command before###### cmd0,cmd1,cmd2,cmd3:%f,%f,%f,%f.\n"
+					, cmd0, cmd1, cmd2, cmd3);
+
 			if(snav_data->general_status.on_ground == 0
 				&& snav_data->sonar_0_raw.range > 0.30
 				&& (cmd0 !=0 || cmd1 !=0)
@@ -5340,39 +5616,56 @@ int main(int argc, char* argv[])
 				{
 					now_mag_vel_des = sqrt(snav_data->gps_pos_vel.velocity_estimated[0]*snav_data->gps_pos_vel.velocity_estimated[0]
 											+ snav_data->gps_pos_vel.velocity_estimated[1]*snav_data->gps_pos_vel.velocity_estimated[1]);
+
+                    if (now_mag_vel_des > 2*gohome_vel_des_limit)
+    				{
+    					DEBUG("formal recal before session 1 gps-mode cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
+
+    					pp_cmd0 = cmd0*fabs(2*gohome_vel_des_limit/now_mag_vel_des);
+    					pp_cmd1 = cmd1*fabs(2*gohome_vel_des_limit/now_mag_vel_des);
+
+    					cmd0 = pp_cmd0;
+    					cmd1 = pp_cmd1;
+
+
+						DEBUG("debug_flag formal sn_send_rc_command session 111");
+
+    					DEBUG("formal recal after session 1 gps-mode cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
+    				}
+
 				}
 				else
 				{
 					now_mag_vel_des = sqrt(snav_data->optic_flow_pos_vel.velocity_estimated[0]*snav_data->optic_flow_pos_vel.velocity_estimated[0]
 											+ snav_data->optic_flow_pos_vel.velocity_estimated[1]*snav_data->optic_flow_pos_vel.velocity_estimated[1]);
-				}
 
-				if(now_mag_vel_des > gohome_vel_des_limit)
-				{
-					DEBUG("formal recal before session 1 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
+                    if (now_mag_vel_des > gohome_vel_des_limit)
+    				{
+    					DEBUG("formal recal before session 1 optic-flow-mode cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
 
-					pp_cmd0 = cmd0*fabs(gohome_vel_des_limit/now_mag_vel_des);
-					pp_cmd1 = cmd1*fabs(gohome_vel_des_limit/now_mag_vel_des);
+    					pp_cmd0 = cmd0*fabs(gohome_vel_des_limit/now_mag_vel_des);
+    					pp_cmd1 = cmd1*fabs(gohome_vel_des_limit/now_mag_vel_des);
 
-					cmd0 = pp_cmd0;
-					cmd1 = pp_cmd1;
+    					cmd0 = pp_cmd0;
+    					cmd1 = pp_cmd1;
 
-					DEBUG("formal recal after session 1 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
-				}
+    					DEBUG("formal recal after session 1 optic-flow-mode cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
+    				}
 
-				float go_mag_pitch_roll_limit = sqrt(snav_data->attitude_estimate.pitch*snav_data->attitude_estimate.pitch
+                    float go_mag_pitch_roll_limit = sqrt(snav_data->attitude_estimate.pitch*snav_data->attitude_estimate.pitch
 													+ snav_data->attitude_estimate.roll*snav_data->attitude_estimate.roll);
-				if(go_mag_pitch_roll_limit > go_pitch_roll_limit)
-				{
-					DEBUG("formal recal before session 2 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
+    				if(go_mag_pitch_roll_limit > go_pitch_roll_limit)
+    				{
+    					DEBUG("formal recal before session 2 optic-flow-mode cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
 
-					pp_cmd0 = cmd0*fabs(go_pitch_roll_limit/go_mag_pitch_roll_limit);
-					pp_cmd1 = cmd1*fabs(go_pitch_roll_limit/go_mag_pitch_roll_limit);
+    					pp_cmd0 = cmd0*fabs(go_pitch_roll_limit/go_mag_pitch_roll_limit);
+    					pp_cmd1 = cmd1*fabs(go_pitch_roll_limit/go_mag_pitch_roll_limit);
 
-					cmd0 = pp_cmd0;
-					cmd1 = pp_cmd1;
+    					cmd0 = pp_cmd0;
+    					cmd1 = pp_cmd1;
 
-					DEBUG("formal recal after session 1 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
+    					DEBUG("formal recal after session 2 optic-flow-mode cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
+    				}
 				}
 
 				// cmd limit
@@ -5387,11 +5680,18 @@ int main(int argc, char* argv[])
 					cmd0 = cmd0*(speed_level/cmd_mag);
 					cmd1 = cmd1*(speed_level/cmd_mag);
 
+					DEBUG("debug_flag formal sn_send_rc_command session 222");
+
 					DEBUG("formal recal after session 3 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
 				}
 
 				// last cmd limit
 				float last_cmd_mag = sqrt(last_cmd0*last_cmd0 + last_cmd1*last_cmd1);
+
+                DEBUG("formal recal after session 4 cmd_mag,last_cmd_mag:%f,%f.\n", cmd_mag, last_cmd_mag);
+                DEBUG("formal recal after session 4 cmd0,last_cmd0:%f,%f.\n", cmd0, last_cmd0);
+                DEBUG("formal recal after session 4 cmd1,last_cmd1:%f,%f.\n", cmd1, last_cmd1);
+
 				if(fabs(cmd_mag - last_cmd_mag) > go_cmd_offset_limit
 					|| fabs(cmd0 - last_cmd0) > go_cmd_offset_limit
 					|| fabs(cmd1 - last_cmd1) > go_cmd_offset_limit)
@@ -5416,6 +5716,8 @@ int main(int argc, char* argv[])
 					cmd0 = last_cmd0+(cmd0 - last_cmd0)*p_bate;
 					cmd1 = last_cmd1+(cmd1 - last_cmd1)*p_bate;
 
+					DEBUG("debug_flag formal sn_send_rc_command session 333");
+
 					DEBUG("formal recal after session 4 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
 				}
 
@@ -5427,6 +5729,8 @@ int main(int argc, char* argv[])
 
 					cmd0 = cmd0*(speed_level/cmd_mag);
 					cmd1 = cmd0*(speed_level/cmd_mag);
+
+					DEBUG("debug_flag formal sn_send_rc_command session 444");
 
 					DEBUG("formal recal after session 5 cmd0,cmd1:%f,%f.\n", cmd0, cmd1);
 				}
@@ -5465,7 +5769,30 @@ int main(int argc, char* argv[])
 			DEBUG("[Current sample_size]: [%d]\n", sample_size);
 			DEBUG("[final send_rc_command cmd0 cmd1 cmd2 cmd3]: [%f,%f,%f,%f]\n",cmd0,cmd1,cmd2,cmd3);
 
-			sn_send_rc_command(curSendMode, RC_OPT_LINEAR_MAPPING, cmd0, cmd1, cmd2, cmd3);
+
+			/*
+			if ((((z_est - z_est_startup) >= gps_mode_height) || (revise_height >= gps_mode_height))
+				&& gps_enabled && (gps_status == SN_DATA_VALID))
+			*/
+
+			if ((revise_height >= gps_mode_height)
+                && gps_enabled
+                && (gps_status == SN_DATA_VALID)
+                && ((t_now_for_gps - t_gps_invalid) > 1))
+			{
+				DEBUG("sn_send_rc_command 222 SN_RC_GPS_POS_HOLD_CMD\n");
+				sn_send_rc_command(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING, cmd0, cmd1, cmd2, cmd3);
+			}
+			else
+			{
+				DEBUG("sn_send_rc_command 222 SN_RC_OPTIC_FLOW_POS_HOLD_CMD\n");
+				sn_send_rc_command(SN_RC_OPTIC_FLOW_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING, cmd0, cmd1, cmd2, cmd3);
+			}
+
+			DEBUG("debug_flag formal sn_send_rc_command final****** cmd0,cmd1,cmd2,cmd3:%f,%f,%f,%f.\n"
+					, cmd0, cmd1, cmd2, cmd3);
+
+            last_mode = (SnMode)snav_data->general_status.current_mode;
 
 			// Add by wlh
 			last_cmd0 = cmd0;
