@@ -94,6 +94,16 @@ void* ThreadEmergencySnavUpdate(void*)
 
     server_udp_sockfd = socket(AF_INET,SOCK_DGRAM,0);
 
+    /*
+    char log_filename[256] = "/home/linaro/log_ota";
+    // Confirm logfile name end
+
+    freopen(log_filename, "a", stdout);
+    setbuf(stdout, NULL);       //needn't cache and fflush, output immediately
+    freopen(log_filename, "a", stderr);
+    setbuf(stderr, NULL);       //needn't cache and fflush, output immediately
+    */
+
     const int kMaxNumAttempts = 10;
     while (bind(server_udp_sockfd, (struct sockaddr*)&server_udp_address, server_udp_len) != 0)
     {
@@ -253,9 +263,12 @@ int main(int argc, char* argv[])
         }
         else
         {
-            DEBUG("udp recvfrom return length=%d, errno=%d\n", length, errno);
+            //DEBUG("udp recvfrom return length=%d, errno=%d\n", length, errno);
         }
     }
+
+    //fclose(stdout);
+    //fclose(stderr);
 
     return 0;
 }

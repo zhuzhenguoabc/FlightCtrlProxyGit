@@ -495,6 +495,10 @@ int main(int argc, char* argv[])
 		{
 			printf("Pass\n");
 		}
+		else if (optic_flow_status == SN_DATA_WARNING)
+		{
+			printf("Pass-W\n");
+		}
 		else
 		{
 			pass_false_flag = 1;
