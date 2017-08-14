@@ -59,10 +59,7 @@ typedef enum
   SN_PRESSURE_GPS_LANDING_MODE,
   /**< 3D velocity-controlled descent. */
   SN_GPS_GO_HOME_MODE,
-  /**< 3D velocity-controlled return to home position. */
-  SN_ALT_HOLD_LOW_ANGLE_MODE,
-  /**< Vertical velocity, roll angle, pitch angle, yaw rate with conservative
-   * limits on roll and pitch angles */
+  /**< 3D velocity-controlled return to home position. @newpage */
 } SnMode;
 
 /**
@@ -118,9 +115,6 @@ typedef enum
   SN_RC_VIO_POS_HOLD_CMD,
   /**< Command vehicle-relative X and Y speeds, Z speed, and yaw rate using
        visual inertial odometry (VIO). */
-  SN_RC_ALT_HOLD_LOW_ANGLE_CMD,
-  /**< Command pitch angle, negative roll angle, Z speed, and yaw rate with a
-       more conservative limit on maximum tilt angle. */
   SN_RC_NUM_CMD_TYPES
   /**< Do not use -- Reserved to hold the number of RC command types. @newpage */
 } SnRcCommandType;

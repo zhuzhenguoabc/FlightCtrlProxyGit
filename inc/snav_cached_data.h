@@ -77,8 +77,8 @@ typedef struct
   /**< Estimated input system voltage.  (Units: V) */
   float current;
   /**< If available, the estimated electrical current being used by the system.  (Units: A) */
-  uint8_t is_using_external_voltage;
-  /**< 1 -- Voltage is being measured by the external voltage driver.  0 -- Voltage is measured using ESCs. */
+  int32_t is_using_external_voltage;
+  /**< Cast to enum: #SnavBool. 1 -- Voltage is being measured by the external voltage driver.  0 -- Voltage is measured using ESCs. */
   int32_t props_state;
   /**< Cast to enum: #SnPropsState. Propeller state. */
   uint8_t on_ground;
@@ -441,38 +441,6 @@ typedef struct
 } ApiRcRaw;
 
 /**
- * Thrust/Attitude/AngVel commands sent through the API.
- */
-typedef struct
-{
-  uint32_t iter;
-  /**< Loop iteration in which data was logged. */
-  float thrust;
-  /**<  */
-  float qw;
-  /**<  */
-  float qx;
-  /**<  */
-  float qy;
-  /**<  */
-  float qz;
-  /**<  */
-  float ang_vel[3];
-  /**<  */
-} ApiThrustAttAngVel;
-
-/**
- * Received API spin or stop props commands.
- */
-typedef struct
-{
-  uint32_t iter;
-  /**< Loop iteration in which data was logged. */
-  int32_t api_spin_props_rcvd;
-  int32_t api_stop_props_rcvd;
-} ApiPropsCmd;
-
-/**
  * RC commands for control.
  */
 typedef struct
@@ -786,10 +754,6 @@ typedef struct
   /**< Raw Spektrum RC data. */
   ApiRcRaw api_rc_raw;
   /**< RC commands sent through the API. */
-  ApiThrustAttAngVel api_thrust_att_ang_vel;
-  /**< Thrust/Attitude/AngVel commands sent through the API. */
-  ApiPropsCmd api_props_cmd;
-  /**< Received API spin or stop props commands. */
   RcActive rc_active;
   /**< RC commands for control. */
   Camera0FrameInfo camera_0_frame_info;

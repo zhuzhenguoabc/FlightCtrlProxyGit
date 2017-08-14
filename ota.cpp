@@ -38,6 +38,10 @@ using namespace std;
 #define OTA_RESTART_SNAV                    "restart_snav"
 
 
+#define OPEN_GPS                            "open_gps"
+#define CLOSE_GPS                           "close_gps"
+
+
 #define __DEBUG
 
 #ifdef __DEBUG
@@ -257,9 +261,32 @@ int main(int argc, char* argv[])
             else if (strcmp(udp_buff_data, OTA_RESTART_SNAV) == 0)
             {
                 system("stop snav");
-                sleep(3);
+                //sleep(3);
+                sleep(8);
                 system("start snav");
             }
+#if 0
+            else if (strcmp(udp_buff_data, OPEN_GPS) == 0)
+            {
+                system("stop snav");
+                sleep(5);
+                system("sed -i 's/\"gps_port\".*/\"gps_port\" value=\"4\"\\/\\>/g'  /usr/share/data/adsp/eagle_default_port_mapping.xml");
+                system("sed -i 's/\"gps_type\".*/\"gps_type\" value=\"1\"\\/\\>/g'  /usr/share/data/adsp/eagle_default_port_mapping.xml");
+                system("sed -i 's/\"compass_port\".*/\"compass_port\" value=\"2\"\\/\\>/g'  /usr/share/data/adsp/eagle_default_port_mapping.xml");
+                sleep(2);
+                system("start snav");
+            }
+            else if (strcmp(udp_buff_data, CLOSE_GPS) == 0)
+            {
+                system("stop snav");
+                sleep(5);
+                system("sed -i 's/\"gps_port\".*/\"gps_port\" value=\"-1\"\\/\\>/g'  /usr/share/data/adsp/eagle_default_port_mapping.xml");
+                system("sed -i 's/\"gps_type\".*/\"gps_type\" value=\"-1\"\\/\\>/g'  /usr/share/data/adsp/eagle_default_port_mapping.xml");
+                system("sed -i 's/\"compass_port\".*/\"compass_port\" value=\"-1\"\\/\\>/g'  /usr/share/data/adsp/eagle_default_port_mapping.xml");
+                sleep(2);
+                system("start snav");
+            }
+#endif
         }
         else
         {
