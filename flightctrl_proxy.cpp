@@ -20,6 +20,7 @@
 #include <sys/un.h>
 #include <stddef.h>
 #include <sys/time.h>
+#include <inttypes.h>
 
 // Waypoint utilities
 #include "snav_waypoint_utils.hpp"
@@ -37,16 +38,45 @@ using namespace std;
 #define DEBUG(format, ...)
 #endif
 
-/************** Function macro defines******************/
-#define USE_SNAV_DEV
-#define LOW_BATTERY_AUTO_LANDING
+/**************Static Function switcher defines******************/
+#define USE_SNAV_DEV                                // use the snav or snav-dev dpkg
+#define LOW_BATTERY_AUTO_LANDING                    // auto land when in low battery status
 #define SPEED_LIMIT_FLAG
 #define CIRCLE_HEIGHT_LIMIT_FLAG
+#define LOW_HEIGHT_LIMIT_VEL
+#define RGB_RED_GREEN_OPPOSITE
 //#define LOW_SAMPLE_SIZE_SWITCH_ALT_MODE
 //#define HEIGHT_LIMIT
 //#define AUTO_REDUCE_HEIGHT
 //#define AUTO_FACE_TAKE_OFF
 //#define AUTO_ALT_MODE_SWITCH
+
+
+/********************Dynamic variables**************************/
+/* low battery set */
+const float low_battery_led_warning = 6.75f;
+const float force_landing_battery_indoor = 6.75f;   //6.55f;
+const float force_landing_battery_outdoor = 6.8f;   //6.7f;
+
+/* udp timeout set */
+struct timeval timeout_udp = {0, 20000};            //20ms
+struct timeval timeout_follow = {0, 300000};        //300ms cuiyc
+
+/* time interval set */
+const double time_interval_of_gps_valid = 2;        // S: for switch to gps-mode
+const double time_interval_of_imu_invalid = 0.2;    // S: for stop propers when drone is inverted
+const double time_interval_of_low_spin = 0.2;       // S: for stop propers more faster when landing on the ground
+const double time_for_spin_on_ground = 10;          // S: for auto stop propers when keep on the ground
+const double time_interval_of_face_takeoff = 4;     // S: for face auto takeoff
+
+/* log file limit */
+const int log_file_size_total_limit = 1024;         // 1G
+const int log_file_size_single_limit = 200;         // 200M
+
+/* hover vel and brake cmd limit */
+const float hover_vel_limit = 0.2;                  // over the vel limit will auto reverse the drone
+const float hover_brake_limit = 0.2;                // cmd limit of the auto reverse
+
 
 
 #define SERVER_UDP_PORT                         14559
@@ -228,8 +258,6 @@ using namespace std;
 #define VEL_LINEAR_LIMIT_OPTIC_MACRO(x) (-0.003*(x)*(x) + 0.0812*(x) + 0.5013)
 
 #define CMD_INPUT_LIMIT(x,y)      (x>y?y:(x<(-y)?(-y):x))
-#define HOVER_VEL_LIMIT           0.2
-#define HOVER_BRAKE_CMD           0.2
 
 typedef unsigned char byte;
 
@@ -329,6 +357,7 @@ static bool bNeedLedColorCtl = false;
 struct body_info cur_body;
 static bool face_follow_switch = false;
 static bool body_follow_switch = false;
+static bool body_follow_start = false;
 static bool hand_gesture_switch = true;
 static bool face_rotate_switch = false; // false: drone will parallel; true:drone will first rotate to face then close
 static bool body_follow_prallel = false; //prallel fly
@@ -340,26 +369,16 @@ const float face_height_limit = 2.2f;
 const float face_vel_limit = 1.0f;   //m/sec
 const float body_speed_limit = 2.0f; //m/s  10km/h   2.78*2.5 25km/h
 static float init_width,init_height; //body init
+static bool follow_reset_yaw = false;
 
 float speed_last =0;
-const float low_battery = 6.75f;
-const double time_interval = 2;
-const double time_interval_of_imu_invalid = 0.2;
-const double time_interval_of_low_spin = 0.2;
-const float force_landing_battery_indoor = 6.55f;
-const float force_landing_battery_outdoor = 6.7f;
-const double time_for_spin_on_ground = 10;
 static bool face_detect = false;
 static bool face_takeoff_flag = false;
-const double time_interval_of_face_takeoff = 4;
 
 /****************Log control************************/
 int log_count = 0;
 int current_log_count = 0;
 char log_filename[TMP_BUFF_LEN];
-const int log_file_size_total_limit = 1024; // 1G
-const int log_file_size_single_limit = 200; // 200M
-
 
 typedef struct
 {
@@ -402,13 +421,6 @@ static char ota_restart_snav[DOMAIN_BUFF_SIZE];
 
 static bool send_fpv_flag = false;
 static char fpv_switcher_buff[DOMAIN_BUFF_SIZE];
-
-//struct timeval timeout_udp = {0, 200000};             //200ms
-//struct timeval timeout_udp = {0, 100000};             //100ms
-struct timeval timeout_udp = {0, 20000};                //20ms
-
-struct timeval timeout_follow = {0, 300000};       //200ms //cuiyc test 20ms
-
 
 // *****************tool functions start******************************
 vector<string> split(const string& s, const string& delim)
@@ -870,7 +882,8 @@ void* ThreadGetVideoBodyFollowParam(void*)
                 {
                     int center_x, center_y;
 
-                    if(init_width <= 1.0f || init_height <= 1.0f)
+                    if((init_width <= 1.0f || init_height <= 1.0f)
+                        && body_follow_start)
                     {
                         init_width = track_result.width;
                         init_height = track_result.height;
@@ -880,6 +893,8 @@ void* ThreadGetVideoBodyFollowParam(void*)
 
                         DEBUG("follow init_width :%f,init_height:%f init cx:%d cy:%d\n",
                             init_width,init_height,init_cx,init_cy);
+
+                        cur_body.angle= (FOLLOW_IMG_WIDTH*0.5 -init_cx)*window_degree/FOLLOW_IMG_WIDTH;
                     }
                     else
                     {
@@ -891,24 +906,21 @@ void* ThreadGetVideoBodyFollowParam(void*)
                             track_result.x,track_result.y,track_result.width,track_result.height);
                         DEBUG("follow track_result center_x:%d center_y:%d\n",center_x,center_y);
 
-                        if(track_result.width < init_width)
-                            //velocity_forward = (1.0-track_result.width/init_width)*body_speed_limit;
+                        if(track_result.width < init_width && track_result.width != 0)
                             velocity_forward = (init_width/track_result.width -1.0)*3;
                         else
-                            //velocity_forward = (1.0-track_result.width/init_width)*body_speed_limit;
                             velocity_forward = 0;
 
                         if(velocity_forward > body_speed_limit) velocity_forward = body_speed_limit;
                         if(velocity_forward < -1*body_speed_limit) velocity_forward = -1*body_speed_limit;
 
-                        // if(velocity_forward < 0)
-                        //    velocity_forward = 0.5f*velocity_forward;
-
                         if(fabs(velocity_forward) <0.05 )
                             velocity_forward = 0;
 
-                        cur_body.velocity = 0.6f*cur_body.velocity+0.4f*velocity_forward;
-                        //cur_body.velocity = velocity_forward;
+                        if(!body_follow_start || init_width < 1)
+                            cur_body.velocity = 0;
+                        else
+                            cur_body.velocity = 0.8f*cur_body.velocity+0.2f*velocity_forward;
 
                         cur_body.angle= (FOLLOW_IMG_WIDTH*0.5 -center_x)*window_degree/FOLLOW_IMG_WIDTH;
                     }
@@ -923,6 +935,7 @@ void* ThreadGetVideoBodyFollowParam(void*)
                 }
                 else
                 {
+                    DEBUG("track_result missing \n");
                     cur_body.have_body=false;
                     cur_body.velocity= 0;
                     cur_body.angle = 0;
@@ -933,10 +946,11 @@ void* ThreadGetVideoBodyFollowParam(void*)
                 {
                     int j=0;
                     memset(followdata,0,sizeof(followdata));
-                    j  = sprintf( followdata,  "%d,", 5102 );
 
                     if(track_result.trackStatus == 1)
                     {
+                        j  = sprintf( followdata,  "%d,", 5102 );
+
 #ifdef FOLLOW_BAOHONG
                         j += sprintf( followdata + j, "%d,", (int)(track_result.x*0.5f));
                         j += sprintf( followdata + j, "%d,", (int)(track_result.y*0.5f));
@@ -949,8 +963,19 @@ void* ThreadGetVideoBodyFollowParam(void*)
                         j += sprintf( followdata + j, "%d",  (int)(track_result.height));
 #endif
                     }
-                    else
+                    else if(track_result.trackStatus == 2)
                     {
+                        j  = sprintf( followdata,  "%d,", 5102 );
+
+                        j += sprintf( followdata + j, "%d,", 0 );
+                        j += sprintf( followdata + j, "%d,", 0 );
+                        j += sprintf( followdata + j, "%d,", 0 );
+                        j += sprintf( followdata + j, "%d", 0 );
+                    }
+                    else if(track_result.trackStatus == 0)
+                    {
+                        //lost too long need user reselect
+                        j  = sprintf( followdata,  "%d,", 5103 );
                         j += sprintf( followdata + j, "%d,", 0 );
                         j += sprintf( followdata + j, "%d,", 0 );
                         j += sprintf( followdata + j, "%d,", 0 );
@@ -959,7 +984,7 @@ void* ThreadGetVideoBodyFollowParam(void*)
 
                     send_apk_result = sendto(server_apk_sockfd, followdata, strlen(followdata), 0,
                        (struct sockaddr*)&bh_apk_client, sizeof(bh_apk_client));
-                    printf("follow info: %s to app result:%d\n", followdata,send_apk_result);
+                    printf("follow info: %s to app result:%d ,port:%d\n", followdata,send_apk_result,ntohs(bh_apk_client.sin_port));
                 }
             }
             else if(strncmp(track_result.head,"TKPH",4) == 0)
@@ -1101,9 +1126,9 @@ void* ThreadInteractWithQcamvid(void*)
     }
 }
 
-void* ThreadInteractWithOta(void*)
+void* ThreadInteractWithOtaAndLimitLog(void*)
 {
-    DEBUG("ThreadInteractWithOta start\n");
+    DEBUG("ThreadInteractWithOtaAndLimitLog start\n");
 
     int socket_cli;
 
@@ -1239,8 +1264,13 @@ void* ThreadLedControl(void*)
                 continue_purple_count = 0;
                 continue_blue_ex_count = 0;
 
-                led_colors[0] = 0;      //255;
-                led_colors[1] = 255;    //0;
+#ifdef RGB_RED_GREEN_OPPOSITE
+                led_colors[0] = 0;
+                led_colors[1] = 255;
+#else
+                led_colors[0] = 255;
+                led_colors[1] = 0;
+#endif
                 led_colors[2] = 0;
 
                 break;
@@ -1255,8 +1285,13 @@ void* ThreadLedControl(void*)
                 continue_purple_count = 0;
                 continue_blue_ex_count = 0;
 
-                led_colors[0] = 255;    //0;
-                led_colors[1] = 0;      //255;
+#ifdef RGB_RED_GREEN_OPPOSITE
+                led_colors[0] = 255;
+                led_colors[1] = 0;
+#else
+                led_colors[0] = 0;
+                led_colors[1] = 255;
+#endif
                 led_colors[2] = 0;
 
                 break;
@@ -1325,7 +1360,7 @@ void* ThreadLedControl(void*)
 
                 break;
             }
-            case LedColor::LED_COLOR_BLUE_EX:
+            case LedColor::LED_COLOR_BLUE_EX:       // will not twinkle different from blue twinkle
             {
                 continue_red_count = 0;
                 continue_green_count = 0;
@@ -1369,11 +1404,6 @@ void* ThreadLedControl(void*)
             led_colors[2] = 0;
         }
 
-        /*
-        DEBUG("sn_set_led_colors bNeedLedColorCtl:%d,led_color_status:%d, Color:%d,%d,%d\n",
-                bNeedLedColorCtl, led_color_status, led_colors[0], led_colors[1], led_colors[2]);
-        */
-
         if (bNeedLedColorCtl)
         {
             int ret = sn_set_led_colors(led_colors, sizeof(led_colors), timeout);
@@ -1412,7 +1442,7 @@ void* ThreadInfrared(void*)
 
         tcflush(fd, TCIOFLUSH);
 
-        usleep(10000); //10ms
+        usleep(15000); //15ms
 
         while (count < 3)
         {
@@ -1456,26 +1486,44 @@ void* ThreadInfrared(void*)
 
 int main(int argc, char* argv[])
 {
+    /********************Dynamic variables Start**************************/
+    float use_alt_mode = 0; //1;        // control with alt mode, loiter with optic/gps mode
+    float use_infrared = 1;             // use infrared data to obstacle avoidance
+
+    const float fTakeOffHeight = 1.6;       // m: loiter height when take off
+    const float fTrarilHeight = 1.8;        // m
+    const float kTakeoffSpeed = 0.9;        // m/s  z_vel*2/3 = 0.6 cmd2
+    const float kLandingSpeed = -0.75;      // m/s  z_vel*2/3 = 0.5 cmd2
+    const float sonar_valid_data_max = 2;   // m
+    const float sonar_invalid_data_max = 6; // m: invalid data 7.56
+
+    int use_revise_height = 0;              // revise height with barometer and sonar
+
+    int reverse_rule_sample_size = 0;       // Optic flow mode reverse rule: sample_size missing
+    int reverse_rule_desire = 0;            // Optic flow mode reverse rule: desire diff with estimate
+    int reverse_rule_linacc = 0;            // Optic flow mode reverse rule: linacc overlimit
+
+    int reverse_full_flag = 0;              // reverse with all abnormal situation
+    int reverse_ctrl_flag = 0;              // reverse with realtime control
+
+    float gps_mode_height = 4;          // m: switch to gps mode over this height
+    float circle_height_limit = 4;      // m: circle height limit
+
+    float speed_coefficient = 1.0f;     // speed coefficient of cmd
+    float height_limit = 20.0f;         // m: dynamic height limit
+
+    const float fMaxCmdValue = 0.6;
+    const float fMaxHoverBrakeCmd = 0.2;
+    /********************Dynamic variables End**************************/
+
+
+
+    char result_to_client[MAX_BUFF_LEN];
     int  udpOverTimeCount = 0;
     bool bHaveUdpClient = false;
     char current_udp_client_addr[TMP_BUFF_LEN];
     bool bReceivedUdpMsg = false;
 
-    char result_to_client[MAX_BUFF_LEN];
-
-    float speed_coefficient = 1.0f;
-    float height_limit = 20.0f;             // m
-    float gps_mode_height = 5;              // m
-    float circle_height_limit = 4;
-
-    const float fMaxCmdValue = 0.6;
-    const float fMaxHoverBrakeCmd = 0.2;
-
-    const float fTakeOffHeight = 1.6;       // m
-
-    const float fTrarilHeight = 1.8;        // m
-    const float kTakeoffSpeed = 0.9;        // m/s  z_vel*2/3 = 0.6 cmd2
-    const float kLandingSpeed = -0.75;      // m/s  z_vel*2/3 = 0.5 cmd2
     bool confirm_land = false;
 
     float vel_target = 0.75;                // m/s
@@ -1520,10 +1568,6 @@ int main(int argc, char* argv[])
     // Limit of cmd and vel in ALT_HOLD_MODE
     float cmd_limit = 0.1;  //2;
     float vel_limit = 0.5;  //8;
-
-    float use_alt_mode = 0; //1;
-
-    float use_infrared = 1;
 
     // Auto reduce the height when disconnect with client
     bool auto_reduce_height_mission = false;
@@ -1619,7 +1663,7 @@ int main(int argc, char* argv[])
     float low_baro_height_sum = 0;
 
     const float go_pitch_roll_limit = 0.1;          //0.15;
-    const float go_cmd_offset_limit = 5;    //0.05;         //0.02;         //5;
+    const float go_cmd_offset_limit = 0.1;  //5;    //0.05;         //0.02;         //5;
 
     const float cmd_offset_limit = 0.02;
 
@@ -1651,17 +1695,6 @@ int main(int argc, char* argv[])
     double t_normal_rpm = 0;
 
     double t_client_valid = 0;
-
-    // For revise height with barometer and sonar
-    int use_revise_height = 0;  //1;
-
-    // Optic flow mode reverse rule
-    int reverse_rule_sample_size = 0;   //1;    // sample_size missing
-    int reverse_rule_desire = 0;        //1;    // desire diff with estimate
-    int reverse_rule_linacc = 0;        //1;    // linacc overlimit
-
-    int reverse_full_flag = 0;          //1;
-    int reverse_ctrl_flag = 0;          //1;    // reverse with realtime control
 
     float revise_height = 0;            // height calced with baro and sonar
     float baro_groud = 0;
@@ -1838,10 +1871,10 @@ int main(int argc, char* argv[])
             continue;
         }
 
-        result = pthread_create(&interact_with_ota_thread, &thread_attr, ThreadInteractWithOta, NULL);
+        result = pthread_create(&interact_with_ota_thread, &thread_attr, ThreadInteractWithOtaAndLimitLog, NULL);
         if (result != 0)
         {
-            perror("interact_with_ota_thread create failed");
+            perror("interact_with_ota_and_limit_log_thread create failed");
             pthread_attr_destroy(&thread_attr);
             continue;
         }
@@ -1929,7 +1962,8 @@ int main(int argc, char* argv[])
         DEBUG("\nFailed to get flight data pointer!\n");
         return -1;
     }
-    //udp communicate with tracker --cuiyc
+
+    // Udp communicate with tracker --cuiyc
     int tracker_udp_sockfd;
     struct sockaddr_in address_tracker;
     bzero(&address_tracker, sizeof(address_tracker));
@@ -1943,6 +1977,7 @@ int main(int argc, char* argv[])
     int server_udp_len;
     struct sockaddr_in server_udp_address;
 
+    bzero(&server_udp_address, sizeof(server_udp_address));
     server_udp_address.sin_family       = AF_INET;
     server_udp_address.sin_addr.s_addr  = htonl(INADDR_ANY);
     server_udp_address.sin_port         = htons(SERVER_UDP_PORT);
@@ -2088,7 +2123,6 @@ int main(int argc, char* argv[])
             && !face_mission
             && !body_mission)
         {
-            // Avoid control cmd over 20ms
             if ((udpOverTimeCount > 0)
                 && (time_temp_now > 0)
                 && (last_client_msg_time > 0)
@@ -2253,6 +2287,7 @@ int main(int argc, char* argv[])
                     }
                 }
             }
+            /* Cal the height with baro_diff and sonar End */
 
             if (revise_height < 0)
             {
@@ -3039,7 +3074,7 @@ int main(int argc, char* argv[])
                     || (((/*z_est - z_est_startup*/revise_height) > 15.0f && (/*z_est - z_est_startup*/revise_height) <= 20.0f) && (voltage < 7.2f))
                     || (((/*z_est - z_est_startup*/revise_height) > 20.0f) && (voltage < 7.3f)))
 #else
-            else if (voltage < low_battery)
+            else if (voltage < low_battery_led_warning)
 #endif
             {
                 bNeedLedColorCtl = true;
@@ -3142,7 +3177,7 @@ int main(int argc, char* argv[])
                         body_mission = false;
 
                         face_follow_switch = false;
-                        body_follow_switch = false;
+                        //body_follow_switch = false;
 
                         // For snav control
                         int rolli = -1;
@@ -3212,12 +3247,10 @@ int main(int argc, char* argv[])
                             }
                             else
                             {
-                                if ((/*z_est - z_est_startup*/revise_height)  <= 5.0f)
+                                if (revise_height <= 5.0f)
                                 {
-#if 0
                                     //avoid the optic flow error
-                                    if (((/*z_est - z_est_startup*/revise_height) <= 1.0f)
-                                        || snav_data->sonar_0_raw.range <= 1.0f)
+                                    if ((revise_height <= 1.0f) || snav_data->sonar_0_raw.range <= 1.0f)
                                     {
                                         cmd0 = cmd0*0.5f*speed_coefficient;
                                         cmd1 = cmd1*0.5f*speed_coefficient;
@@ -3235,7 +3268,7 @@ int main(int argc, char* argv[])
                                             cmd1 = cmd1*speed_coefficient;
                                         }
                                     }
-#endif
+
                                     if (mode != SN_GPS_POS_HOLD_MODE)
                                     {
                                         cmd0 = cmd0*0.6;
@@ -3523,6 +3556,68 @@ int main(int argc, char* argv[])
                             }
 #endif
 
+#ifdef LOW_HEIGHT_LIMIT_VEL
+                            // Limit the height
+                            if ((revise_height <= 1) && snav_data->sonar_0_raw.range <= 1.0f)
+                            {
+                                DEBUG("[%d] The drone have reached the limit height.\n", loop_counter);
+
+                                cmd0 = 0;
+                                cmd1 = 0;
+
+                                // Reverse the drone when speed is over the low-height-limit
+                                if (mode == SN_GPS_POS_HOLD_MODE)
+                                {
+                                    // Use gps data
+                                    float current_vel_est = sqrt(snav_data->gps_pos_vel.velocity_estimated[0]*snav_data->gps_pos_vel.velocity_estimated[0]
+                                                            + snav_data->gps_pos_vel.velocity_estimated[1]*snav_data->gps_pos_vel.velocity_estimated[1]);
+
+                                    float current_vel_x_est = snav_data->gps_pos_vel.velocity_estimated[0];
+                                    float current_vel_y_est = snav_data->gps_pos_vel.velocity_estimated[1];
+
+                                    if (fabs(current_vel_est) > hover_vel_limit)
+                                    {
+                                        float current_vel_x_yawed = current_vel_x_est*cos(-yaw_est_gps) - current_vel_y_est*sin(-yaw_est_gps);
+                                        float current_vel_y_yawed = current_vel_x_est*sin(-yaw_est_gps) + current_vel_y_est*cos(-yaw_est_gps);
+
+                                        cmd0 = -hover_brake_limit*current_vel_x_yawed;
+                                        cmd1 = -hover_brake_limit*current_vel_y_yawed;
+
+                                        cmd0 = CMD_INPUT_LIMIT(cmd0, fMaxHoverBrakeCmd);
+                                        cmd1 = CMD_INPUT_LIMIT(cmd1, fMaxHoverBrakeCmd);
+
+                                        DEBUG("[%d] OPTIC_FLOW FORMAL_OVER_SPEED[current_vel_est, vel_x_est, vel_y_est]=[%f,%f,%f], [vel_x_yawed, vel_y_yawed]=[%f,%f], [cmd0, cmd1]=[%f,%f]\n",
+                                                  loop_counter, current_vel_est, current_vel_x_est, current_vel_y_est,
+                                                  current_vel_x_yawed, current_vel_y_yawed, cmd0, cmd1);
+                                    }
+                                }
+                                else
+                                {
+                                    // Use optic_flow data
+                                    float current_vel_est = sqrt(snav_data->optic_flow_pos_vel.velocity_estimated[0]*snav_data->optic_flow_pos_vel.velocity_estimated[0]
+                                                                + snav_data->optic_flow_pos_vel.velocity_estimated[1]*snav_data->optic_flow_pos_vel.velocity_estimated[1]);
+                                    float current_vel_x_est = snav_data->optic_flow_pos_vel.velocity_estimated[0];
+                                    float current_vel_y_est = snav_data->optic_flow_pos_vel.velocity_estimated[1];
+
+                                    if (fabs(current_vel_est) > hover_vel_limit)
+                                    {
+                                        float current_vel_x_yawed = current_vel_x_est*cos(-yaw_est) - current_vel_y_est*sin(-yaw_est);
+                                        float current_vel_y_yawed = current_vel_x_est*sin(-yaw_est) + current_vel_y_est*cos(-yaw_est);
+
+                                        cmd0 = -hover_brake_limit*current_vel_x_yawed;
+                                        cmd1 = -hover_brake_limit*current_vel_y_yawed;
+
+                                        cmd0 = CMD_INPUT_LIMIT(cmd0, fMaxHoverBrakeCmd);
+                                        cmd1 = CMD_INPUT_LIMIT(cmd1, fMaxHoverBrakeCmd);
+
+                                        DEBUG("[%d] OPTIC_FLOW FORMAL_OVER_SPEED[current_vel_est, vel_x_est, vel_y_est]=[%f,%f,%f], [vel_x_yawed, vel_y_yawed]=[%f,%f], [cmd0, cmd1]=[%f,%f]\n",
+                                                  loop_counter, current_vel_est, current_vel_x_est, current_vel_y_est,
+                                                  current_vel_x_yawed, current_vel_y_yawed, cmd0, cmd1);
+                                    }
+                                }
+                            }
+#endif
+
                             // Add by wlh-----------limit the speed to make the drone fly smoothly start
                             /*
                             if (snav_data->general_status.on_ground == 0
@@ -3687,8 +3782,8 @@ int main(int argc, char* argv[])
                             else if ((/*z_est - z_est_startup*/revise_height >= gps_mode_height)
                                         && gps_enabled
                                         && (gps_status == SN_DATA_VALID)
-                                        && ((t_now_for_gps - t_gps_invalid) > time_interval)
-                                        && ((t_des_now - t_gps_height_invalid) > time_interval))
+                                        && ((t_now_for_gps - t_gps_invalid) > time_interval_of_gps_valid)
+                                        && ((t_des_now - t_gps_height_invalid) > time_interval_of_gps_valid))
                             {
                                 sn_send_rc_command(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_DEFAULT_RC, cmd0, cmd1, cmd2, cmd3);
                             }
@@ -3765,10 +3860,6 @@ int main(int argc, char* argv[])
                                             cmd0 = CMD_INPUT_LIMIT(cmd0, fMaxHoverBrakeCmd);
                                             cmd1 = CMD_INPUT_LIMIT(cmd1, fMaxHoverBrakeCmd);
 
-                                            DEBUG("[%d] OPTIC_FLOW FORMAL_OVER_SPEED[current_vel_est, vel_x_est, vel_y_est]=[%f,%f,%f], [vel_x_yawed, vel_y_yawed]=[%f,%f], [cmd0, cmd1]=[%f,%f]\n",
-                                                      loop_counter, current_vel_est, current_vel_x_est, current_vel_y_est,
-                                                      current_vel_x_yawed, current_vel_y_yawed, cmd0, cmd1);
-
                                             DEBUG("[%d] OPTIC_FLOW INFRAED_DEBUG Control Brake[current_vel_est, vel_x_est, vel_y_est]=[%f,%f,%f], [vel_x_yawed, vel_y_yawed]=[%f,%f], [cmd0, cmd1]=[%f,%f]\n",
                                                         loop_counter, current_vel_est, current_vel_x_est, current_vel_y_est,
                                                         current_vel_x_yawed, current_vel_y_yawed, cmd0, cmd1);
@@ -3793,8 +3884,8 @@ int main(int argc, char* argv[])
                                 if ((/*z_est - z_est_startup*/revise_height >= gps_mode_height)
                                     && gps_enabled
                                     && (gps_status == SN_DATA_VALID)
-                                    && ((t_now_for_gps - t_gps_invalid) > time_interval)
-                                    && ((t_des_now - t_gps_height_invalid) > time_interval))
+                                    && ((t_now_for_gps - t_gps_invalid) > time_interval_of_gps_valid)
+                                    && ((t_des_now - t_gps_height_invalid) > time_interval_of_gps_valid))
                                 {
                                     sn_send_rc_command(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_DEFAULT_RC, cmd0, cmd1, cmd2, cmd3);
                                 }
@@ -3863,8 +3954,8 @@ int main(int argc, char* argv[])
                                         if ((/*z_est - z_est_startup*/revise_height >= gps_mode_height)
                                             && gps_enabled
                                             && (gps_status == SN_DATA_VALID)
-                                            && ((t_now_for_gps - t_gps_invalid) > time_interval)
-                                            && ((t_des_now - t_gps_height_invalid) > time_interval))
+                                            && ((t_now_for_gps - t_gps_invalid) > time_interval_of_gps_valid)
+                                            && ((t_des_now - t_gps_height_invalid) > time_interval_of_gps_valid))
                                         {
                                             sn_send_rc_command(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_DEFAULT_RC, cmd0, cmd1, cmd2, cmd3);
                                         }
@@ -3879,8 +3970,8 @@ int main(int argc, char* argv[])
                                     if ((/*z_est - z_est_startup*/revise_height >= gps_mode_height)
                                         && gps_enabled
                                         && (gps_status == SN_DATA_VALID)
-                                        && ((t_now_for_gps - t_gps_invalid) > time_interval)
-                                        && ((t_des_now - t_gps_height_invalid) > time_interval))
+                                        && ((t_now_for_gps - t_gps_invalid) > time_interval_of_gps_valid)
+                                        && ((t_des_now - t_gps_height_invalid) > time_interval_of_gps_valid))
                                     {
                                         sn_send_rc_command(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_DEFAULT_RC, cmd0, cmd1, cmd2, cmd3);
                                     }
@@ -3919,6 +4010,9 @@ int main(int argc, char* argv[])
 
                             DEBUG("[%d] debug_flag control sn_send_rc_command final [cmd0,cmd1,cmd2,cmd3]: [%f,%f,%f,%f]\n",
                                         loop_counter, cmd0, cmd1, cmd2, cmd3);
+
+                            DEBUG("[%d] debug_flag control sn_send_rc_command timestamp: %" PRId64 "\n",
+                                        loop_counter, snav_data->esc_raw.time);
 
                             // Add by wlh
                             last_cmd0 = cmd0;
@@ -3984,6 +4078,7 @@ int main(int argc, char* argv[])
                     char rpm_info[TMP_BUFF_LEN];
                     char sonar_info[TMP_BUFF_LEN];
                     char gps_info[TMP_BUFF_LEN];
+                    char satellites_info[TMP_BUFF_LEN];
                     char xyz_info[TMP_BUFF_LEN];
                     char rpy_info[TMP_BUFF_LEN];
                     char flight_state_info[TMP_BUFF_LEN];
@@ -3994,11 +4089,18 @@ int main(int argc, char* argv[])
                     char ir_distance_info[TMP_BUFF_LEN];
                     char velocity_info[TMP_BUFF_LEN];
                     char yaw_info[TMP_BUFF_LEN];
+                    char mission_info[TMP_BUFF_LEN];
+                    char face_detect_info[TMP_BUFF_LEN];
+                    char body_detect_info[TMP_BUFF_LEN];
+                    char cpu_temp[TMP_BUFF_LEN];
+                    float cpu_max_temp = 0;
+                    char baro_temp[TMP_BUFF_LEN];
 
                     memset(battery_info, 0, TMP_BUFF_LEN);
                     memset(rpm_info, 0, TMP_BUFF_LEN);
                     memset(sonar_info, 0, TMP_BUFF_LEN);
                     memset(gps_info, 0, TMP_BUFF_LEN);
+                    memset(satellites_info, 0, TMP_BUFF_LEN);
                     memset(xyz_info, 0, TMP_BUFF_LEN);
                     memset(rpy_info, 0, TMP_BUFF_LEN);
                     memset(flight_state_info, 0, TMP_BUFF_LEN);
@@ -4009,6 +4111,11 @@ int main(int argc, char* argv[])
                     memset(ir_distance_info, 0, TMP_BUFF_LEN);
                     memset(velocity_info, 0, TMP_BUFF_LEN);
                     memset(yaw_info, 0, TMP_BUFF_LEN);
+                    memset(mission_info, 0, TMP_BUFF_LEN);
+                    memset(face_detect_info, 0, TMP_BUFF_LEN);
+                    memset(body_detect_info, 0, TMP_BUFF_LEN);
+                    memset(cpu_temp, 0, TMP_BUFF_LEN);
+                    memset(baro_temp, 0, TMP_BUFF_LEN);
 
                     sprintf(battery_info, "battery_info:%f", voltage);
                     sprintf(rpm_info, "rpm_info:%d:%d:%d:%d", snav_data->esc_raw.rpm[0],
@@ -4034,6 +4141,7 @@ int main(int argc, char* argv[])
                     if (gps_enabled != 1)
                     {
                         sprintf(gps_info, "gps_info:disable");
+                        sprintf(satellites_info, "satellites:0");
                         sprintf(hor_acc_info, "hor_acc:-1");
                     }
                     else
@@ -4048,6 +4156,7 @@ int main(int argc, char* argv[])
                                                                 snav_data->gps_0_raw.latitude);
                         }
                         sprintf(hor_acc_info, "hor_acc:%.0f", snav_data->gps_0_raw.horizontal_acc);
+                        sprintf(satellites_info, "satellites:%d", snav_data->gps_0_raw.num_satellites);
                     }
 
                     if (state == MissionState::ON_GROUND)
@@ -4114,10 +4223,45 @@ int main(int argc, char* argv[])
 
                     memset(result_to_client, 0, MAX_BUFF_LEN);
                     sprintf(result_to_client, "%s", SNAV_TASK_GET_INFO_RETURN);
-
                     sprintf(sample_size_info, "sample_size:%d", sample_size);
-
                     sprintf(ir_distance_info, "ir_distance:%f", ir_distance);
+
+                    if (circle_mission)
+                    {
+                        sprintf(mission_info, "mission:1");
+                    }
+                    else if (face_mission)
+                    {
+                        sprintf(mission_info, "mission:2");
+                    }
+                    else if (body_mission)
+                    {
+                        sprintf(mission_info, "mission:3");
+                    }
+                    else if (return_mission)
+                    {
+                        sprintf(mission_info, "mission:4");
+                    }
+                    else
+                    {
+                        sprintf(mission_info, "mission:0");
+                    }
+
+                    sprintf(face_detect_info, "face_detect:%d:%d:%d", face_follow_switch, face_rotate_switch, cur_body.have_face);
+                    sprintf(body_detect_info, "body_detect:%d:%d", body_follow_switch, cur_body.have_body);
+
+
+                    cpu_max_temp = cpu_status.temp[0];
+                    for (int i = 0; i < 10; i++)
+                    {
+                        if (cpu_status.temp[i] >= cpu_max_temp)
+                        {
+                            cpu_max_temp = cpu_status.temp[i];
+                        }
+                    }
+                    sprintf(cpu_temp, "cpu_temp:%.0f", cpu_max_temp);
+                    sprintf(baro_temp, "baro_temp:%.0f", snav_data->barometer_0_raw.temp);
+
 
                     strcat(result_to_client, STR_SEPARATOR);
                     strcat(result_to_client, battery_info);
@@ -4127,6 +4271,8 @@ int main(int argc, char* argv[])
                     strcat(result_to_client, sonar_info);
                     strcat(result_to_client, STR_SEPARATOR);
                     strcat(result_to_client, gps_info);
+                    strcat(result_to_client, STR_SEPARATOR);
+                    strcat(result_to_client, satellites_info);
                     strcat(result_to_client, STR_SEPARATOR);
                     strcat(result_to_client, xyz_info);
                     strcat(result_to_client, STR_SEPARATOR);
@@ -4149,6 +4295,16 @@ int main(int argc, char* argv[])
                     strcat(result_to_client, velocity_info);
                     strcat(result_to_client, STR_SEPARATOR);
                     strcat(result_to_client, yaw_info);
+                    strcat(result_to_client, STR_SEPARATOR);
+                    strcat(result_to_client, mission_info);
+                    strcat(result_to_client, STR_SEPARATOR);
+                    strcat(result_to_client, face_detect_info);
+                    strcat(result_to_client, STR_SEPARATOR);
+                    strcat(result_to_client, body_detect_info);
+                    strcat(result_to_client, STR_SEPARATOR);
+                    strcat(result_to_client, cpu_temp);
+                    strcat(result_to_client, STR_SEPARATOR);
+                    strcat(result_to_client, baro_temp);
 
                     // Sendback to udp client
                     length = sendto(server_udp_sockfd, result_to_client, strlen(result_to_client), 0,
@@ -4186,6 +4342,7 @@ int main(int argc, char* argv[])
                 }
                 else if ((udp_msg_array.size() >= 1) && (udp_msg_array[0].compare(SNAV_TASK_GET_LINARO_VERSION) == 0))
                 {
+                    /*
                     FILE *version_fp;
                     char expected_version[TMP_BUFF_LEN];
 
@@ -4205,6 +4362,9 @@ int main(int argc, char* argv[])
                     {
                         expected_version[strlen(expected_version)-1] = '\0';
                     }
+                    */
+
+                    char expected_version[TMP_BUFF_LEN] = "1.2.0";
 
                     memset(result_to_client, 0, MAX_BUFF_LEN);
                     sprintf(result_to_client, "%s", SNAV_TASK_GET_LINARO_VERSION_RETURN);
@@ -4276,7 +4436,7 @@ int main(int argc, char* argv[])
                 }
                 else if ((udp_msg_array.size() >= 1) && (udp_msg_array[0].compare(SNAV_TASK_GET_HW_VERSION) == 0))
                 {
-                    char current_version[TMP_BUFF_LEN] = "";
+                    char current_version[TMP_BUFF_LEN] = "FC02-HW-1.1.0";
 
                     memset(result_to_client, 0, MAX_BUFF_LEN);
                     sprintf(result_to_client, "%s", SNAV_TASK_GET_HW_VERSION_RETURN);
@@ -4289,7 +4449,7 @@ int main(int argc, char* argv[])
                 }
                 else if ((udp_msg_array.size() >= 1) && (udp_msg_array[0].compare(SNAV_TASK_GET_SN) == 0))
                 {
-                    char sn_number[TMP_BUFF_LEN] = "";
+                    char sn_number[TMP_BUFF_LEN] = "43242343251";
 
                     memset(result_to_client, 0, MAX_BUFF_LEN);
                     sprintf(result_to_client, "%s", SNAV_TASK_GET_SN_RETURN);
@@ -4529,12 +4689,12 @@ int main(int argc, char* argv[])
 
                     memset(result_to_client, 0, MAX_BUFF_LEN);
                     sprintf(result_to_client, "%s", SNAV_CMD_RETURN_CHECK_CAM_FREQ);
-                    if (strcmp(current_cam_freq, "Frequency=50Hz") == 0)
+                    if (strncmp(current_cam_freq, "Frequency=50Hz", 14) == 0)
                     {
                         strcat(result_to_client, STR_SEPARATOR);
                         strcat(result_to_client, "0");
                     }
-                    else if (strcmp(current_cam_freq, "Frequency=60Hz") == 0)
+                    else if (strncmp(current_cam_freq, "Frequency=60Hz", 14) == 0)
                     {
                         strcat(result_to_client, STR_SEPARATOR);
                         strcat(result_to_client, "1");
@@ -4978,12 +5138,12 @@ int main(int argc, char* argv[])
 
                     memset(result_to_client, 0, MAX_BUFF_LEN);
                     sprintf(result_to_client, "%s", SNAV_CMD_RETURN_MODIFY_CAM_FREQ);
-                    if (strcmp(current_cam_freq, "Frequency=50Hz") == 0)
+                    if (strncmp(current_cam_freq, "Frequency=50Hz", 14) == 0)
                     {
                         strcat(result_to_client, STR_SEPARATOR);
                         strcat(result_to_client, "0");
                     }
-                    else if (strcmp(current_cam_freq, "Frequency=60Hz") == 0)
+                    else if (strncmp(current_cam_freq, "Frequency=60Hz", 14) == 0)
                     {
                         strcat(result_to_client, STR_SEPARATOR);
                         strcat(result_to_client, "1");
@@ -4995,7 +5155,7 @@ int main(int argc, char* argv[])
                 }
             }
 
-            // Update Notice the ThreadInteractWithOta process to send msg to OTA app
+            // Update Notice the ThreadInteractWithOtaAndLimitLog process to send msg to OTA app
             if ((udp_msg_array.size() >= 1)
                 && (udp_msg_array[0].compare(SNAV_TASK_SNAV_UPDATE) == 0)
                 && (props_state == SN_PROPS_STATE_NOT_SPINNING)
@@ -5306,7 +5466,23 @@ int main(int argc, char* argv[])
                                  (struct sockaddr*)&address_tracker, sizeof(struct sockaddr));
                     DEBUG("[%d] SNAV_TASK_START_TRACKER func=%d, length=%d\n", loop_counter, func[0], length);
                 }
-                else
+                else if (strcmp(udp_msg_array[1].c_str(), "start") == 0 /*||
+                    strcmp(udp_msg_array[1].c_str(), "up") == 0*/)
+                {
+                    body_follow_start = true;
+                    init_width = 0;
+                    init_height = 0;
+
+                    DEBUG("[%d] SNAV_TASK_START_TRACKER func=%s, length=%d\n", loop_counter, udp_msg_array[1].c_str(), length);
+                }
+                else if (strcmp(udp_msg_array[1].c_str(), "down") == 0)
+                {
+                    body_follow_start = false;
+                    follow_reset_yaw = true;
+                    body_mission = false;
+                    DEBUG("[%d] SNAV_TASK_START_TRACKER func=%s, length=%d\n", loop_counter, udp_msg_array[1].c_str(), length);
+                }
+                else if (strcmp(udp_msg_array[1].c_str(), "off") == 0)
                 {
                     body_follow_switch = false;
 
@@ -5317,8 +5493,10 @@ int main(int argc, char* argv[])
                     init_width = 0;
                     init_height = 0;
 
-                    cur_body.velocity= 0;
-                    cur_body.angle= 0;
+                    cur_body.velocity = 0;
+                    cur_body.angle = 0;
+                    follow_reset_yaw = true;
+                    body_mission = false;
 
                     //send command to stop tracker
                     unsigned short func[32];
@@ -5328,8 +5506,8 @@ int main(int argc, char* argv[])
                     DEBUG("[%d] SNAV_TASK_STOP_TRACKER func=%d, length=%d\n", loop_counter, func[0], length);
                 }
 
-                face_mission = false;
-                body_mission = false;
+                //face_mission = false;
+                //body_mission = false;
             }
 
             // FaceFollow mode
@@ -5595,14 +5773,33 @@ int main(int argc, char* argv[])
                         // Baro linear data have more than 1m error, so use z data instead.
                         z_vel_des = kTakeoffSpeed;
 
-                        if (z_est - z_est_startup >= 0.75*fTakeOffHeight)    //0.6
+                        if (snav_data->sonar_0_raw.range > sonar_invalid_data_max)
                         {
-                            z_vel_des = 0;
-                            state = MissionState::LOITER;
+                            if (z_est - z_est_startup >= 0.75*fTakeOffHeight)
+                            {
+                                z_vel_des = 0;
+                                state = MissionState::LOITER;
+                            }
+                            else if (z_est - z_est_startup > 0.3f*fTakeOffHeight)
+                            {
+                                z_vel_des = kTakeoffSpeed*0.15f;     //0.3f
+                            }
                         }
-                        else if (z_est - z_est_startup > 0.3f*fTakeOffHeight)
+                        else
                         {
-                            z_vel_des = kTakeoffSpeed*0.15f;     //0.3f
+                            if ((z_est - z_est_startup >= 0.75*fTakeOffHeight)
+                                && (snav_data->sonar_0_raw.range >= 0.75*fTakeOffHeight)
+                                && (snav_data->sonar_0_raw.range < sonar_valid_data_max))
+                            {
+                                z_vel_des = 0;
+                                state = MissionState::LOITER;
+                            }
+                            else if ((z_est - z_est_startup > 0.3f*fTakeOffHeight)
+                                     && (snav_data->sonar_0_raw.range > 0.3f*fTakeOffHeight)
+                                     && (snav_data->sonar_0_raw.range < sonar_valid_data_max))
+                            {
+                                z_vel_des = kTakeoffSpeed*0.15f;     //0.3f
+                            }
                         }
                     }
                 }
@@ -7173,29 +7370,6 @@ int main(int argc, char* argv[])
                     //static float f_dest_yaw,f_dest_x,f_dest_y;
                     static float speed ,angle_body_offset;
                     static float backup_speed ,backup_angle;
-#if 0
-                    //keep a long time (200ms) same speed and angle ,udp lag or miss or follow app be killed
-                    if(backup_speed == cur_body.velocity &&
-                        backup_angle == cur_body.angle)
-                    {
-                        if(bd_start_counter  >10)
-                        {
-                            body_mission = false;
-                            state = MissionState::LOITER;
-                            cur_body.velocity = 0;
-                            cur_body.angle    = 0;
-                            DEBUG("body_mission follow body->LOITER because no body info update\n");
-                        }
-                        else
-                            bd_start_counter++;
-                    }
-                    else
-                    {
-                        backup_speed = cur_body.velocity;
-                        backup_angle = cur_body.angle;
-                        bd_start_counter = 0;
-                    }
-#endif
                     angle_body_offset = cur_body.angle*M_PI/180;
 
                     if(body_follow_prallel)
@@ -7248,18 +7422,6 @@ int main(int argc, char* argv[])
                     if(fabs(angle_body_offset) > min_angle_offset)
                     {
                         vel_yaw_target = angle_body_offset*vel_target*1.5;
-                        vel_x_target =0;
-                        vel_y_target =0;
-                        vel_z_target =0;
-                        DEBUG(" [%d] follow body_mission [vel_x_target vel_y_target vel_yaw_target]: [%f %f %f]\n",
-                            loop_counter,vel_x_target,vel_y_target,vel_yaw_target);
-                    }
-                    //else //cuiyc
-                    {
-                        //vel_yaw_target = 0;
-
-                        //DEBUG("[%d] body_mission angle_body_offset: [%f] \n",
-                        //      loop_counter,angle_body_offset);
 
                         float curheight = z_est - z_est_startup;
                         float sonarheight = snav_data->sonar_0_raw.range;
@@ -7269,7 +7431,7 @@ int main(int argc, char* argv[])
                         DEBUG("[%d] body_mission angle_body_offset: [%f] curheight:%f,sonarheight:%f\n",
                                 loop_counter,angle_body_offset,curheight,sonarheight);
 
-                        if( true/*curheight>1.9f && curheight <2.1f*/)
+                        if(true/*curheight>1.9f && curheight <2.1f*/)
                         {
                             vel_x_target = cos(yaw_est)*cur_body.velocity;
                             vel_y_target = sin(yaw_est)*cur_body.velocity;
@@ -7296,8 +7458,35 @@ int main(int argc, char* argv[])
                         }
                     }
                     }
-                }// Cuiyc add face detect end
+                }
 
+                if(cur_body.have_body && body_follow_switch)
+                {
+                    float body_offset ;
+                    body_offset = M_PI*cur_body.angle/180;
+                    DEBUG("followme have_body\n" );
+
+                    if ((fabs(body_offset)>min_angle_offset
+                            || fabs(cur_body.velocity)>0.05f)
+                        && !panorama_mission
+                        && !fly_test_mission
+                        && !rotation_test_mission
+                        && !circle_mission
+                        && !return_mission
+                        && !trail_navigation_mission
+                        && !customized_plan_mission)
+                    {
+                        body_mission= true;
+                        DEBUG("body angle:%f    velocity:%f\n",cur_body.angle,cur_body.velocity);
+                        DEBUG("followme  BODY_FOLLOW\n" );
+                    }
+                }
+
+                if(follow_reset_yaw)
+                {
+                   vel_yaw_target = 0;
+                   follow_reset_yaw = false;
+                }// cuiyc add face detect end
 
                 // Return mission
                 if (return_mission)
@@ -7639,8 +7828,8 @@ int main(int argc, char* argv[])
                 if ((revise_height >= gps_mode_height)
                     && gps_enabled
                     && (gps_status == SN_DATA_VALID)
-                    && ((t_now_for_gps - t_gps_invalid) > time_interval)
-                    && ((t_des_now - t_gps_height_invalid) > time_interval))
+                    && ((t_now_for_gps - t_gps_invalid) > time_interval_of_gps_valid)
+                    && ((t_des_now - t_gps_height_invalid) > time_interval_of_gps_valid))
                 {
                     sn_apply_cmd_mapping(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING,
                                          gohome_x_vel_des_yawed, gohome_y_vel_des_yawed,
@@ -7666,8 +7855,8 @@ int main(int argc, char* argv[])
                 if ((revise_height >= gps_mode_height)
                     && gps_enabled
                     && (gps_status == SN_DATA_VALID)
-                    && ((t_now_for_gps - t_gps_invalid) > time_interval)
-                    && ((t_des_now - t_gps_height_invalid) > time_interval))
+                    && ((t_now_for_gps - t_gps_invalid) > time_interval_of_gps_valid)
+                    && ((t_des_now - t_gps_height_invalid) > time_interval_of_gps_valid))
                 {
                     sn_apply_cmd_mapping(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING,
                                          x_vel_des_yawed, y_vel_des_yawed,
@@ -7703,7 +7892,6 @@ int main(int argc, char* argv[])
             {
                 if ((/*z_est - z_est_startup*/revise_height)  <= 5.0f)
                 {
-#if 0
                     //avoid the optic flow error
                     if (((/*z_est - z_est_startup*/revise_height) <= 1.0f)
                         || snav_data->sonar_0_raw.range <= 1.0f)
@@ -7724,7 +7912,6 @@ int main(int argc, char* argv[])
                             cmd1 = cmd1*speed_coefficient;
                         }
                     }
-#endif
 
                     if (mode != SN_GPS_POS_HOLD_MODE)
                     {
@@ -7782,6 +7969,68 @@ int main(int argc, char* argv[])
                 length=sendto(server_udp_sockfd,result_to_client,strlen(result_to_client),0,(struct sockaddr *)&remote_addr,sizeof(struct sockaddr));
             }
 #endif
+
+#ifdef LOW_HEIGHT_LIMIT_VEL
+            // Limit the height
+            if (((/*z_est - z_est_startup*/revise_height) <= 1) && snav_data->sonar_0_raw.range <= 1.0f)
+            {
+                DEBUG("[%d] The drone have reached the limit height.\n", loop_counter);
+
+                cmd0 = 0;
+                cmd1 = 0;
+
+                if (mode == SN_GPS_POS_HOLD_MODE)
+                {
+                    // Use gps data
+                    float current_vel_est = sqrt(snav_data->gps_pos_vel.velocity_estimated[0]*snav_data->gps_pos_vel.velocity_estimated[0]
+                                            + snav_data->gps_pos_vel.velocity_estimated[1]*snav_data->gps_pos_vel.velocity_estimated[1]);
+
+                    float current_vel_x_est = snav_data->gps_pos_vel.velocity_estimated[0];
+                    float current_vel_y_est = snav_data->gps_pos_vel.velocity_estimated[1];
+
+                    if (fabs(current_vel_est) > hover_vel_limit)
+                    {
+                        float current_vel_x_yawed = current_vel_x_est*cos(-yaw_est_gps) - current_vel_y_est*sin(-yaw_est_gps);
+                        float current_vel_y_yawed = current_vel_x_est*sin(-yaw_est_gps) + current_vel_y_est*cos(-yaw_est_gps);
+
+                        cmd0 = -hover_brake_limit*current_vel_x_yawed;
+                        cmd1 = -hover_brake_limit*current_vel_y_yawed;
+
+                        cmd0 = CMD_INPUT_LIMIT(cmd0, fMaxHoverBrakeCmd);
+                        cmd1 = CMD_INPUT_LIMIT(cmd1, fMaxHoverBrakeCmd);
+
+                        DEBUG("[%d] OPTIC_FLOW FORMAL_OVER_SPEED[current_vel_est, vel_x_est, vel_y_est]=[%f,%f,%f], [vel_x_yawed, vel_y_yawed]=[%f,%f], [cmd0, cmd1]=[%f,%f]\n",
+                                  loop_counter, current_vel_est, current_vel_x_est, current_vel_y_est,
+                                  current_vel_x_yawed, current_vel_y_yawed, cmd0, cmd1);
+                    }
+                }
+                else
+                {
+                    // Use optic_flow data
+                    float current_vel_est = sqrt(snav_data->optic_flow_pos_vel.velocity_estimated[0]*snav_data->optic_flow_pos_vel.velocity_estimated[0]
+                                                + snav_data->optic_flow_pos_vel.velocity_estimated[1]*snav_data->optic_flow_pos_vel.velocity_estimated[1]);
+                    float current_vel_x_est = snav_data->optic_flow_pos_vel.velocity_estimated[0];
+                    float current_vel_y_est = snav_data->optic_flow_pos_vel.velocity_estimated[1];
+
+                    if (fabs(current_vel_est) > hover_vel_limit)
+                    {
+                        float current_vel_x_yawed = current_vel_x_est*cos(-yaw_est) - current_vel_y_est*sin(-yaw_est);
+                        float current_vel_y_yawed = current_vel_x_est*sin(-yaw_est) + current_vel_y_est*cos(-yaw_est);
+
+                        cmd0 = -hover_brake_limit*current_vel_x_yawed;
+                        cmd1 = -hover_brake_limit*current_vel_y_yawed;
+
+                        cmd0 = CMD_INPUT_LIMIT(cmd0, fMaxHoverBrakeCmd);
+                        cmd1 = CMD_INPUT_LIMIT(cmd1, fMaxHoverBrakeCmd);
+
+                        DEBUG("[%d] OPTIC_FLOW FORMAL_OVER_SPEED[current_vel_est, vel_x_est, vel_y_est]=[%f,%f,%f], [vel_x_yawed, vel_y_yawed]=[%f,%f], [cmd0, cmd1]=[%f,%f]\n",
+                                  loop_counter, current_vel_est, current_vel_x_est, current_vel_y_est,
+                                  current_vel_x_yawed, current_vel_y_yawed, cmd0, cmd1);
+                    }
+                }
+            }
+#endif
+
             // Switch from optic-flow-mode  to  gps-pos-mode
             if (((last_mode == SN_OPTIC_FLOW_POS_HOLD_MODE) && (mode == SN_GPS_POS_HOLD_MODE))
                 || ((last_mode == SN_GPS_POS_HOLD_MODE) && (mode == SN_OPTIC_FLOW_POS_HOLD_MODE)))
@@ -8294,8 +8543,9 @@ int main(int argc, char* argv[])
             else if ((/*(z_est - z_est_startup)*/revise_height >= gps_mode_height)
                         && gps_enabled
                         && (gps_status == SN_DATA_VALID)
-                        && ((t_now_for_gps - t_gps_invalid) > time_interval)
-                        && ((t_des_now - t_gps_height_invalid) > time_interval))
+                        && ((t_now_for_gps - t_gps_invalid) > time_interval_of_gps_valid)
+                        && ((t_des_now - t_gps_height_invalid) > time_interval_of_gps_valid)
+                        && !circle_mission))
             {
                 sn_send_rc_command(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING, cmd0, cmd1, cmd2, cmd3);
             }
@@ -8307,8 +8557,9 @@ int main(int argc, char* argv[])
             if ((/*(z_est - z_est_startup)*/revise_height >= gps_mode_height)
                 && gps_enabled
                 && (gps_status == SN_DATA_VALID)
-                && ((t_now_for_gps - t_gps_invalid) > time_interval)
-                && ((t_des_now - t_gps_height_invalid) > time_interval))
+                && ((t_now_for_gps - t_gps_invalid) > time_interval_of_gps_valid)
+                && ((t_des_now - t_gps_height_invalid) > time_interval_of_gps_valid)
+                && !circle_mission)
             {
                 sn_send_rc_command(SN_RC_GPS_POS_HOLD_CMD, RC_OPT_LINEAR_MAPPING, cmd0, cmd1, cmd2, cmd3);
             }
@@ -8328,13 +8579,13 @@ int main(int argc, char* argv[])
                             float current_vel_x_est = snav_data->gps_pos_vel.velocity_estimated[0];
                             float current_vel_y_est = snav_data->gps_pos_vel.velocity_estimated[1];
 
-                            if (fabs(current_vel_est) > HOVER_VEL_LIMIT)
+                            if (fabs(current_vel_est) > hover_vel_limit)
                             {
                                 float current_vel_x_yawed = current_vel_x_est*cos(-yaw_est_gps) - current_vel_y_est*sin(-yaw_est_gps);
                                 float current_vel_y_yawed = current_vel_x_est*sin(-yaw_est_gps) + current_vel_y_est*cos(-yaw_est_gps);
 
-                                cmd0 = -HOVER_BRAKE_CMD*current_vel_x_yawed;
-                                cmd1 = -HOVER_BRAKE_CMD*current_vel_y_yawed;
+                                cmd0 = -hover_brake_limit*current_vel_x_yawed;
+                                cmd1 = -hover_brake_limit*current_vel_y_yawed;
 
                                 cmd0 = CMD_INPUT_LIMIT(cmd0, fMaxHoverBrakeCmd);
                                 cmd1 = CMD_INPUT_LIMIT(cmd1, fMaxHoverBrakeCmd);
@@ -8352,13 +8603,13 @@ int main(int argc, char* argv[])
                             float current_vel_x_est = snav_data->optic_flow_pos_vel.velocity_estimated[0];
                             float current_vel_y_est = snav_data->optic_flow_pos_vel.velocity_estimated[1];
 
-                            if (fabs(current_vel_est) > HOVER_VEL_LIMIT)
+                            if (fabs(current_vel_est) > hover_vel_limit)
                             {
                                 float current_vel_x_yawed = current_vel_x_est*cos(-yaw_est) - current_vel_y_est*sin(-yaw_est);
                                 float current_vel_y_yawed = current_vel_x_est*sin(-yaw_est) + current_vel_y_est*cos(-yaw_est);
 
-                                cmd0 = -HOVER_BRAKE_CMD*current_vel_x_yawed;
-                                cmd1 = -HOVER_BRAKE_CMD*current_vel_y_yawed;
+                                cmd0 = -hover_brake_limit*current_vel_x_yawed;
+                                cmd1 = -hover_brake_limit*current_vel_y_yawed;
 
                                 cmd0 = CMD_INPUT_LIMIT(cmd0, fMaxHoverBrakeCmd);
                                 cmd1 = CMD_INPUT_LIMIT(cmd1, fMaxHoverBrakeCmd);
@@ -8488,6 +8739,8 @@ int main(int argc, char* argv[])
 #endif
             DEBUG("[%d] debug_flag formal sn_send_rc_command final [cmd0,cmd1,cmd2,cmd3]: [%f,%f,%f,%f]. [z_vel_est, z_vel_des]:[%f, %f]\n"
                         , loop_counter, cmd0, cmd1, cmd2, cmd3, snav_data->optic_flow_pos_vel.velocity_estimated[2], snav_data->optic_flow_pos_vel.velocity_desired[2]);
+            DEBUG("[%d] debug_flag formal sn_send_rc_command timestamp: %" PRId64 "\n",
+                                        loop_counter, snav_data->esc_raw.time);
 
             last_mode = (SnMode)snav_data->general_status.current_mode;
 
